@@ -11,7 +11,8 @@ DECLARE @DetectedTip table (
                            details nvarchar(max) null
                            );
 
-DECLARE @ReturnAllTips bit = 1; -- Debug flag to return all tips regardless of database state
+DECLARE @ReturnAllTips bit = 1, -- Debug flag to return all tips regardless of database state
+        @HighLogRateThresholdPercent decimal(5,2) = 80;
 
 SET NOCOUNT ON;
 
@@ -38,7 +39,8 @@ VALUES
 (1150, 'Recent CPU throttling', 'Significant CPU throttling has recently occurred, as noted in the "details" column. If workload performance is insufficient, tune query workload to consume less CPU, or scale up to a service objective with more CPU capacity, or both.', NULL, 'https://aka.ms/sqldbtips-1150'),
 (1160, 'Recent out of memory errors', 'Out of memory errors have recently occurred, as noted in the "details" column. Tune query workload to consume less memory, or scale up to a service objective with more memory, or both.', NULL, 'https://aka.ms/sqldbtips-1160'),
 (1170, 'Low reads nonclustered indexes', 'The "details" column contains a list of nonclustered indexes where the number of read operations is much less than the number of write (index update) operations. As data changes, indexes are updated, taking time and resources. The resource overhead of updating indexes with few reads may be higher than their benefit. If the data in "details" is for a sufficiently long period that covers infrequent workloads, consider dropping these indexes.', NULL, 'https://aka.ms/sqldbtips-1170'),
-(1180, 'Data compression opportunities', 'The "details" column contains a list of objects, indexes, and partitions showing their suggested new data compression type, based on recent workload sampling and heuristics. To improve suggestion accuracy, obtain this result while a representative workload is running, or shortly thereafter.', NULL, 'https://aka.ms/sqldbtips-1180')
+(1180, 'Data compression opportunities', 'The "details" column contains a list of objects, indexes, and partitions showing their suggested new data compression type, based on recent workload sampling and heuristics. To improve suggestion accuracy, obtain this result while a representative workload is running, or shortly thereafter.', NULL, 'https://aka.ms/sqldbtips-1180'),
+(1190, 'Log rate close to limit', 'There are recent occurrences of log rate approaching the limit of the service objective, as noted in the "details" column. To improve performance of bulk data modifications including data loading, consider tuning the workload to reduce log rate, or consider scaling to a service objective with a higher maximum log rate.', NULL, 'https://aka.ms/sqldbtips-1190')
 ;
 
 -- Avoid blocking user DDL due to shared locks reading metadata
@@ -429,6 +431,49 @@ SELECT 1180 AS tip_id,
                  CAST(CONCAT('schema: ', QUOTENAME(OBJECT_SCHEMA_NAME(object_id)), ', object: ', QUOTENAME(OBJECT_NAME(object_id)), ', index: ', QUOTENAME(index_name), ', partition range: ', partition_range, ', new compression type: ', new_compression_type) AS nvarchar(max)), CONCAT(CHAR(13), CHAR(10))
                  ) WITHIN GROUP (ORDER BY object_id, index_name, partition_range, new_compression_type)
 FROM packed_partition_group 
+;
+
+-- High log rate
+WITH
+log_rate_snapshot AS
+(
+SELECT end_time,
+       avg_log_write_percent,
+       IIF(avg_log_write_percent > @HighLogRateThresholdPercent, 1, 0) AS high_log_rate_indicator
+FROM sys.dm_db_resource_stats
+),
+pre_packed_log_rate_snapshot AS
+(
+SELECT end_time,
+       avg_log_write_percent,
+       high_log_rate_indicator,
+       ROW_NUMBER() OVER (ORDER BY end_time) -- row number across all readings, in increasing chronological order
+       -
+       SUM(high_log_rate_indicator) OVER (ORDER BY end_time ROWS UNBOUNDED PRECEDING) -- running sum of all intervals where log rate exceeded the threshold
+       AS grouping_helper -- this difference remains constant while log rate is above the threshold
+FROM log_rate_snapshot
+),
+packed_log_rate_snapshot AS
+(
+SELECT MIN(end_time) AS min_end_time,
+       MAX(end_time) AS max_end_time,
+       AVG(avg_log_write_percent) AS avg_log_write_percent
+FROM pre_packed_log_rate_snapshot
+WHERE high_log_rate_indicator = 1
+GROUP BY grouping_helper
+),
+log_rate_top_stat AS
+(
+SELECT MAX(DATEDIFF(second, min_end_time, max_end_time)) AS top_log_rate_duration_seconds,
+       MAX(avg_log_write_percent) AS top_log_write_percent,
+       COUNT(1) AS count_high_log_write_intervals
+FROM packed_log_rate_snapshot 
+)
+INSERT INTO @DetectedTip (tip_id, details)
+SELECT 1190 AS tip_id,
+       CONCAT('In the last hour, there were  ', count_high_log_write_intervals, ' intervals with log rate staying above ', @HighLogRateThresholdPercent, '%. The longest such interval lasted ', top_log_rate_duration_seconds, ' seconds, and the highest log rate was ', top_log_write_percent, '%.') AS details
+FROM log_rate_top_stat 
+WHERE count_high_log_write_intervals > 0
 ;
 
 -- Return detected tips
