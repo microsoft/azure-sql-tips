@@ -11,8 +11,24 @@ DECLARE @DetectedTip table (
                            details nvarchar(max) null
                            );
 
-DECLARE @ReturnAllTips bit = 1, -- Debug flag to return all tips regardless of database state
-        @HighLogRateThresholdPercent decimal(5,2) = 80;
+DECLARE @ReturnAllTips bit = 1; -- Debug flag to return all tips regardless of database state
+
+-- Configurable thresholds
+DECLARE @HighLogRateThresholdPercent decimal(5,2) = 80, -- Minimum log rate as percentage of SLO limit that is considered as being too high in the "Log rate close to limit" tip
+        @GuidLeadingColumnObjectMinSizeMB int = 1024, -- Minimum table size to be considered in the "GUID leading columns in btree indexes" tip
+        @UsedToMaxsizeSpaceThresholdRatio decimal(3,2) = 0.8, -- The ratio of used space to database MAXSIZE that is considered as being too high in the "Used space close to MAXSIZE" tip
+        @AllocatedToMaxsizeSpaceThresholdRatio decimal(3,2) = 0.8, -- The ratio of allocated space to database MAXSIZE that is considered as being too high in the "Allocated space close to MAXSIZE" tip
+        @UsedToAllocatedSpaceThresholdRatio decimal(3,2) = 0.5, -- The ratio of used space to allocated space that is considered as being too low in the "Allocated space much larger than used space" tip
+        @UsedToAllocatedSpaceDbMinSizeMB int = 10240, -- Minimum database size to be considered for the "Allocated space much larger than used space" tip
+        @CPUThrottlingDelayThresholdPercent decimal(5,2) = 20, -- Minimum percentage of CPU RG delay to be considered as significant CPU throttling in "Recent CPU throttling" tip
+        @IndexReadWriteThresholdRatio decimal(3,2) = 0.5, -- The ratio of all index reads to index writes that is considered as being too low in the "Low reads nonclustered indexes" tip
+        @CompressionPartitionUpdateRatioThreshold1 decimal(3,2) = 0.2, -- The maximum ratio of updates to all operations to define "infrequent updates" in the "Data compression opportunities" tip
+        @CompressionPartitionUpdateRatioThreshold2 decimal(3,2) = 0.5, -- The maximum ratio of updates to all operations to define "more frequent but not frequent enough updates" in the "Data compression opportunities" tip
+        @CompressionPartitionScanRatioThreshold1 decimal(3,2) = 0.5, -- The minimum ratio of scans to all operations to define "frequent enough scans" in the "Data compression opportunities" tip
+        @CompressionCPUHeadroomThreshold1 decimal(5,2) = 60, -- Maximum CPU usage percentage to be considered as sufficient CPU headroom in the "Data compression opportunities" tip
+        @CompressionCPUHeadroomThreshold2 decimal(5,2) = 80, -- Minimum CPU usage percentage to be considered as insufficient CPU headroom in the "Data compression opportunities" tip
+        @CompressionMinResourceStatSamples smallint = 30 -- Minimum required number of resource stats sampling intervals in the "Data compression opportunities" tip
+;
 
 SET NOCOUNT ON;
 
@@ -207,7 +223,7 @@ WHERE i.type_desc IN ('CLUSTERED','NONCLUSTERED') -- Btree indexes
       AND
       o.is_ms_shipped = 0
       AND
-      os.object_size_mb > 1024 -- consider larger tables only
+      os.object_size_mb > @GuidLeadingColumnObjectMinSizeMB -- consider larger tables only
       AND
       -- data type is uniqueidentifier or an alias data type derived from uniqueidentifier
       EXISTS (
@@ -238,7 +254,7 @@ FROM sys.database_files
 WHERE type_desc = 'ROWS'
       AND
       CAST(DATABASEPROPERTYEX(DB_NAME(), 'MaxSizeInBytes') AS bigint) <> -1 -- not applicable to Hyperscale
-HAVING SUM(CAST(FILEPROPERTY(name, 'SpaceUsed') AS bigint) * 8 / 1024.) > 0.8 * CAST(DATABASEPROPERTYEX(DB_NAME(), 'MaxSizeInBytes') AS bigint) / 1024. / 1024 -- used space > 80% of db maxsize
+HAVING SUM(CAST(FILEPROPERTY(name, 'SpaceUsed') AS bigint) * 8 / 1024.) > @UsedToMaxsizeSpaceThresholdRatio * CAST(DATABASEPROPERTYEX(DB_NAME(), 'MaxSizeInBytes') AS bigint) / 1024. / 1024 -- used space > x% of db maxsize
 ;
 
 -- Allocated space close to maxsize
@@ -248,7 +264,7 @@ FROM sys.database_files
 WHERE type_desc = 'ROWS'
       AND
       CAST(DATABASEPROPERTYEX(DB_NAME(), 'MaxSizeInBytes') AS bigint) <> -1 -- not applicable to Hyperscale
-HAVING SUM(CAST(size AS bigint) * 8 / 1024.) > 0.8 * CAST(DATABASEPROPERTYEX(DB_NAME(), 'MaxSizeInBytes') AS bigint) / 1024. / 1024 -- allocated space > 80% of db maxsize
+HAVING SUM(CAST(size AS bigint) * 8 / 1024.) > @AllocatedToMaxsizeSpaceThresholdRatio * CAST(DATABASEPROPERTYEX(DB_NAME(), 'MaxSizeInBytes') AS bigint) / 1024. / 1024 -- allocated space > 80% of db maxsize
 ;
 
 -- Allocated space >> used space
@@ -262,9 +278,9 @@ WHERE type_desc = 'ROWS'
 INSERT INTO @DetectedTip (tip_id)
 SELECT 1140 AS tip_id
 FROM allocated_used_space
-WHERE used_space * 8 / 1024. > 10240 -- 10 GB and higher, not relevant for small databases
+WHERE used_space * 8 / 1024. > @UsedToAllocatedSpaceDbMinSizeMB -- not relevant for small databases
       AND
-      0.5 * allocated_space > used_space -- allocated space is more than 2x used space
+      @UsedToAllocatedSpaceThresholdRatio * allocated_space > used_space -- allocated space is more than 2x used space
       AND
       DATABASEPROPERTYEX(DB_NAME(), 'Edition') IN ('Premium','BusinessCritical')
 ;
@@ -282,7 +298,7 @@ INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1150 AS tip_id,
        CONCAT('In the last ', recent_history_duration_minutes, ' minutes, there were ', count_cpu_delayed_intervals, ' occurrences of CPU throttling. On average, CPU was throttled by ', avg_cpu_delay_percent, '%.') AS details
 FROM cpu_throttling
-WHERE avg_cpu_delay_percent > 20
+WHERE avg_cpu_delay_percent > @CPUThrottlingDelayThresholdPercent
 ;
 
 -- Recent out of memory errors
@@ -325,7 +341,7 @@ WHERE ius.database_id = DB_ID()
       AND
       o.is_ms_shipped = 0
       AND
-      (ius.user_seeks + ius.user_scans + ius.user_lookups) * 0.5 < ius.user_updates
+      (ius.user_seeks + ius.user_scans + ius.user_lookups) * @IndexReadWriteThresholdRatio < ius.user_updates
 )
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1170 AS tip_id,
@@ -343,6 +359,7 @@ SELECT AVG(avg_cpu_percent) AS avg_cpu_percent,
        DATEDIFF(minute, MIN(end_time), MAX(end_time)) AS recent_cpu_minutes
 FROM sys.dm_db_resource_stats
 ),
+-- Look at index stats for each partition of an index
 partition_stats AS
 (
 SELECT o.object_id,
@@ -373,24 +390,28 @@ partition_compression AS
 SELECT ps.object_id,
        ps.index_name,
        ps.partition_number,
-       CASE WHEN -- do not choose page compression when no index stats are available and update_ratio and scan_ratio are NULL due to low confidence
+       CASE WHEN -- do not choose page compression when no index stats are available and update_ratio and scan_ratio are NULL, due to low confidence
                  (
-                 ps.update_ratio < 0.2 -- infrequently updated
+                 ps.update_ratio < @CompressionPartitionUpdateRatioThreshold1 -- infrequently updated
                  OR 
-                 (ps.update_ratio BETWEEN 0.2 AND 0.5 AND ps.scan_ratio > 0.5) -- more frequently updated but also frequently scanned
+                 (
+                 ps.update_ratio BETWEEN @CompressionPartitionUpdateRatioThreshold1 AND @CompressionPartitionUpdateRatioThreshold2 
+                 AND 
+                 ps.scan_ratio > @CompressionPartitionScanRatioThreshold1
+                 ) -- more frequently updated but also more frequently scanned
                  ) 
                  AND 
-                 rcu.avg_cpu_percent < 60 -- there is ample CPU headroom
+                 rcu.avg_cpu_percent < @CompressionCPUHeadroomThreshold1 -- there is ample CPU headroom
                  AND 
-                 rcu.recent_cpu_minutes > 30 -- there is a sufficient number of CPU usage stats
+                 rcu.recent_cpu_minutes > @CompressionMinResourceStatSamples -- there is a sufficient number of CPU usage stats
             THEN 'PAGE'
-            WHEN rcu.avg_cpu_percent < 80 -- there is some CPU headroom
+            WHEN rcu.avg_cpu_percent < @CompressionCPUHeadroomThreshold2 -- there is some CPU headroom
                  AND 
-                 rcu.recent_cpu_minutes > 30 -- there is a sufficient number of CPU usage stats
+                 rcu.recent_cpu_minutes > @CompressionMinResourceStatSamples -- there is a sufficient number of CPU usage stats
             THEN 'ROW'
-            WHEN rcu.avg_cpu_percent > 80 -- there is no CPU headroom, can't use compression
+            WHEN rcu.avg_cpu_percent > @CompressionCPUHeadroomThreshold2 -- there is no CPU headroom, can't use compression
                  AND 
-                 rcu.recent_cpu_minutes > 30 -- there is a sufficient number of CPU usage stats
+                 rcu.recent_cpu_minutes > @CompressionMinResourceStatSamples -- there is a sufficient number of CPU usage stats
             THEN 'NONE'
             ELSE NULL -- not enough CPU usage stats to decide
        END
@@ -428,8 +449,10 @@ HAVING COUNT(1) > 0
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1180 AS tip_id,
        STRING_AGG(
-                 CAST(CONCAT('schema: ', QUOTENAME(OBJECT_SCHEMA_NAME(object_id)), ', object: ', QUOTENAME(OBJECT_NAME(object_id)), ', index: ', QUOTENAME(index_name), ', partition range: ', partition_range, ', new compression type: ', new_compression_type) AS nvarchar(max)), CONCAT(CHAR(13), CHAR(10))
-                 ) WITHIN GROUP (ORDER BY object_id, index_name, partition_range, new_compression_type)
+                 CAST(CONCAT('schema: ', QUOTENAME(OBJECT_SCHEMA_NAME(object_id)), ', object: ', QUOTENAME(OBJECT_NAME(object_id)), ', index: ', QUOTENAME(index_name), ', partition range: ', partition_range, ', new compression type: ', new_compression_type) AS nvarchar(max)),
+                 CONCAT(CHAR(13), CHAR(10))
+                 ) 
+                 WITHIN GROUP (ORDER BY object_id, index_name, partition_range, new_compression_type)
 FROM packed_partition_group 
 ;
 
@@ -449,8 +472,8 @@ SELECT end_time,
        high_log_rate_indicator,
        ROW_NUMBER() OVER (ORDER BY end_time) -- row number across all readings, in increasing chronological order
        -
-       SUM(high_log_rate_indicator) OVER (ORDER BY end_time ROWS UNBOUNDED PRECEDING) -- running sum of all intervals where log rate exceeded the threshold
-       AS grouping_helper -- this difference remains constant while log rate is above the threshold
+       SUM(high_log_rate_indicator) OVER (ORDER BY end_time ROWS UNBOUNDED PRECEDING) -- running count of all intervals where log rate exceeded the threshold
+       AS grouping_helper -- this difference remains constant while log rate is above the threshold, and can be used to collapse/pack an interval using aggregation
 FROM log_rate_snapshot
 ),
 packed_log_rate_snapshot AS
