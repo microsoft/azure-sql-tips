@@ -1,9 +1,7 @@
 DECLARE @TipDefinition table (
                              tip_id smallint not null primary key,
                              tip_name nvarchar(50) not null unique,
-                             tip_description nvarchar(4000) not null,
-                             sample_command nvarchar(4000) null,
-                             urls nvarchar(4000) null
+                             tip_url nvarchar(200) not null
                              );
 
 DECLARE @DetectedTip table (
@@ -33,30 +31,29 @@ DECLARE @HighLogRateThresholdPercent decimal(5,2) = 80, -- Minimum log rate as p
 SET NOCOUNT ON;
 
 -- Define all tips
-INSERT INTO @TipDefinition (tip_id, tip_name, tip_description, sample_command, urls)
+INSERT INTO @TipDefinition (tip_id, tip_name, tip_url)
 VALUES
-(1000, 'Excessive MAXDOP on all replicas', 'Maximum degree of parallelism for primary and secondary replicas is not in the recommended range of 1 to 8. Depending on workload, this may cause unnecessary resource utilization.', 'ALTER DATABASE SCOPED CONFIGURATION SET MAXDOP = <1-8>; ALTER DATABASE SCOPED CONFIGURATION FOR SECONDARY SET MAXDOP = PRIMARY;', 'https://aka.ms/sqldbtips-1000'),
-(1010, 'Excessive MAXDOP on primary', 'Maximum degree of parallelism for the primary replica is not in the recommended range of 1 to 8. Depending on workload, this may cause unnecessary resource utilization.', 'ALTER DATABASE SCOPED CONFIGURATION SET MAXDOP = <1-8>;', 'https://aka.ms/sqldbtips-1010'),
-(1020, 'Excessive MAXDOP on secondaries', 'Maximum degree of parallelism for secondary replicas is not in the recommended range of 1 to 8. Depending on workload, this may cause unnecessary resource utilization.', 'ALTER DATABASE SCOPED CONFIGURATION FOR SECONDARY SET MAXDOP = <1-8>;', 'https://aka.ms/sqldbtips-1020'),
-(1030, 'Older compatibility level', 'Database compatibility level is not current. Some recent features and improvements are not available in this database. Consider using latest supported compatibility level, but note that changing compatibility level may require testing.', 'ALTER DATABASE CURRENT SET COMPATIBILITY_LEVEL = <N>;', 'https://aka.ms/sqldbtips-1030'),
-(1040, 'Disabled auto-create stats', 'Auto-create statistics is disabled. This causes sub-optimal query plans. Enable auto-create statistics.', 'ALTER DATABASE CURRENT SET AUTO_CREATE_STATISTICS ON;', 'https://aka.ms/sqldbtips-1040'),
-(1050, 'Disabled auto-update stats', 'Auto-update statistics is disabled. This causes sub-optimal query plans. Enable auto-update statistics.', 'ALTER DATABASE CURRENT SET AUTO_UPDATE_STATISTICS ON;', 'https://aka.ms/sqldbtips-1050'),
-(1060, 'Disabled RCSI', 'Read Committed Snapshot Isolation (RCSI) is disabled. This may cause unnecessary lock blocking for DML queries.', 'ALTER DATABASE CURRENT SET READ_COMMITTED_SNAPSHOT ON;', 'https://aka.ms/sqldbtips-1060'),
-(1070, 'Disabled Query Store', 'Query Store is disabled. This complicates performance troubleshooting and disables some auto-tuning features.', 'ALTER DATABASE CURRENT SET QUERY_STORE = ON;', 'https://aka.ms/sqldbtips-1070'),
-(1071, 'Read-only Query Store', 'Query Store is read-only. This complicates performance troubleshooting and disables some auto-tuning features.', 'ALTER DATABASE CURRENT SET QUERY_STORE (OPERATION_MODE = READ_WRITE);', 'https://aka.ms/sqldbtips-1071'),
-(1072, 'Query Store capture mode is NONE', 'Query Store does not capture new queries. This complicates performance troubleshooting and disables some auto-tuning features.', 'ALTER DATABASE CURRENT SET QUERY_STORE (QUERY_CAPTURE_MODE = AUTO);', 'https://aka.ms/sqldbtips-1072'),
-(1080, 'Enabled AUTO_SHRINK', 'While shrinking a database may be required in response to one-time data growth events and/or to occasionally reduce allocated space, it should not be executed continuously by enabling auto-shrink. Auto-shrink causes persistent resource utilization that will impact regular database workloads.', 'ALTER DATABASE CURRENT SET AUTO_SHRINK OFF;', 'https://aka.ms/sqldbtips-1080'),
-(1090, 'PAGE_VERIFY is not CHECKSUM', 'The PAGE_VERIFY database option is not set to CHECKSUM. Using CHECKSUM is recommeded for better data integrity protection.', NULL, 'https://aka.ms/sqldbtips-1090'),
-(1100, 'GUID leading columns in btree indexes', 'The "details" column contains a list of btree indexes with leading columns of data type uniqueidentifier (GUID) for larger objects. Such indexes are subject to high fragmentation and low page density as data is modified. This leads to increased disk space and memory usage. Avoid this pattern in physical database design, particularly for clustered btree indexes. To increase page density and release space, rebuild indexes.', null, 'https://aka.ms/sqldbtips-1100'),
-(1110, 'Disabled FLGP auto-tuning', 'The FORCE_LAST_GOOD_PLAN auto-tuning option is not enabled. Query plan regressions will not be fixed automatically via plan forcing.', 'ALTER DATABASE CURRENT SET AUTOMATIC_TUNING (FORCE_LAST_GOOD_PLAN = ON);', 'https://aka.ms/sqldbtips-1110'),
-(1120, 'Used space close to MAXSIZE', 'Used data space within the database is close to maximum configured database size. To allow continued data growth, increase maximum database size, or scale up to a service tier or service objective that supports higher maximum database size, or implement data compression, or delete unneeded data.', 'ALTER DATABASE <database_name> MODIFY (MAXSIZE = <N> GB);', 'https://aka.ms/sqldbtips-1120'),
-(1130, 'Allocated space close to MAXSIZE', 'Space allocated for data files is close to maximum configured database size. If used space is not close to maximum configured database size and significant used space growth is not expected, consider shrinking data files to reduce allocated space.', 'DBCC SHRINKFILE (<file_id>, TRUNCATEONLY); DBCC SHRINKFILE (<file_id>, <allocated_space_target_in_mb>);', 'https://aka.ms/sqldbtips-1130'),
-(1140, 'Allocated space much larger than used space', 'Space allocated for data files is much larger than used data space. If significant used space growth is not expected, consider shrinking data files to reduce allocated space.', 'DBCC SHRINKFILE (<file_id>, TRUNCATEONLY); DBCC SHRINKFILE (<file_id>, <allocated_space_target_in_mb>);', 'https://aka.ms/sqldbtips-1140'),
-(1150, 'Recent CPU throttling', 'Significant CPU throttling has recently occurred, as noted in the "details" column. If workload performance is insufficient, tune query workload to consume less CPU, or scale up to a service objective with more CPU capacity, or both.', NULL, 'https://aka.ms/sqldbtips-1150'),
-(1160, 'Recent out of memory errors', 'Out of memory errors have recently occurred, as noted in the "details" column. Tune query workload to consume less memory, or scale up to a service objective with more memory, or both.', NULL, 'https://aka.ms/sqldbtips-1160'),
-(1170, 'Low reads nonclustered indexes', 'The "details" column contains a list of nonclustered indexes where the number of read operations is much less than the number of write (index update) operations. As data changes, indexes are updated, taking time and resources. The resource overhead of updating indexes with few reads may be higher than their benefit. If the data in "details" is for a sufficiently long period that covers infrequent workloads, consider dropping these indexes.', NULL, 'https://aka.ms/sqldbtips-1170'),
-(1180, 'Data compression opportunities', 'The "details" column contains a list of objects, indexes, and partitions showing their suggested new data compression type, based on recent workload sampling and heuristics. To improve suggestion accuracy, obtain this result while a representative workload is running, or shortly thereafter.', NULL, 'https://aka.ms/sqldbtips-1180'),
-(1190, 'Log rate close to limit', 'There are recent occurrences of log rate approaching the limit of the service objective, as noted in the "details" column. To improve performance of bulk data modifications including data loading, consider tuning the workload to reduce log rate, or consider scaling to a service objective with a higher maximum log rate.', NULL, 'https://aka.ms/sqldbtips-1190')
+(1000, 'Excessive MAXDOP on all replicas', 'https://github.com/microsoft/azure-sql-tools/wiki/SQL-DB-tips#excessive-maxdop-on-all-replicas'),
+(1010, 'Excessive MAXDOP on primary', 'https://github.com/microsoft/azure-sql-tools/wiki/SQL-DB-tips#excessive-maxdop-on-primary'),
+(1020, 'Excessive MAXDOP on secondaries', 'https://github.com/microsoft/azure-sql-tools/wiki/SQL-DB-tips#excessive-maxdop-on-secondaries'),
+(1030, 'Compatibility level is not current', 'https://github.com/microsoft/azure-sql-tools/wiki/SQL-DB-tips#compatibility-level-is-not-current'),
+(1040, 'Auto-create stats is disabled', 'https://github.com/microsoft/azure-sql-tools/wiki/SQL-DB-tips#auto-create-stats-is-disabled'),
+(1050, 'Auto-update stats is disabled', 'https://github.com/microsoft/azure-sql-tools/wiki/SQL-DB-tips#auto-update-stats-is-disabled'),
+(1060, 'RCSI is disabled', 'https://github.com/microsoft/azure-sql-tools/wiki/SQL-DB-tips#rcsi-is-disabled'),
+(1070, 'Query Store is disabled', 'https://github.com/microsoft/azure-sql-tools/wiki/SQL-DB-tips#query-store-is-disabled'),
+(1071, 'Query Store is read-only', 'https://github.com/microsoft/azure-sql-tools/wiki/SQL-DB-tips#query-store-is-read-only'),
+(1072, 'Query Store capture mode is NONE', 'https://github.com/microsoft/azure-sql-tools/wiki/SQL-DB-tips#query-store-capture-mode-is-none'),
+(1080, 'AUTO_SHRINK is enabled', 'https://github.com/microsoft/azure-sql-tools/wiki/SQL-DB-tips#auto_shrink-is-enabled'),
+(1100, 'Btree indexes have GUID leading columns', 'https://github.com/microsoft/azure-sql-tools/wiki/SQL-DB-tips#btree-indexes-have-guid-leading-columns'),
+(1110, 'FLGP auto-tuning is disabled', 'https://github.com/microsoft/azure-sql-tools/wiki/SQL-DB-tips#flgp-auto-tuning-is-disabled'),
+(1120, 'Used space is close to MAXSIZE', 'https://github.com/microsoft/azure-sql-tools/wiki/SQL-DB-tips#used-space-is-close-to-maxsize'),
+(1130, 'Allocated space is close to MAXSIZE', 'https://github.com/microsoft/azure-sql-tools/wiki/SQL-DB-tips#allocated-space-is-close-to-maxsize'),
+(1140, 'Allocated space is much larger than used space', 'https://github.com/microsoft/azure-sql-tools/wiki/SQL-DB-tips#allocated-space-is-much-larger-than-used-space'),
+(1150, 'Recent CPU throttling found', 'https://github.com/microsoft/azure-sql-tools/wiki/SQL-DB-tips#recent-cpu-throttling-found'),
+(1160, 'Recent out of memory errors found', 'https://github.com/microsoft/azure-sql-tools/wiki/SQL-DB-tips#recent-out-of-memory-errors-found'),
+(1170, 'Nonclustered indexes with low reads found', 'https://github.com/microsoft/azure-sql-tools/wiki/SQL-DB-tips#nonclustered-indexes-with-low-reads-found'),
+(1180, 'Data compression opportunities', 'https://github.com/microsoft/azure-sql-tools/wiki/SQL-DB-tips#data-compression-opportunities'),
+(1190, 'Log rate is close to limit', 'https://github.com/microsoft/azure-sql-tools/wiki/SQL-DB-tips#log-rate-is-close-to-limit')
 ;
 
 -- Avoid blocking user DDL due to shared locks reading metadata
@@ -144,16 +141,29 @@ WHERE name = DB_NAME()
 ;
 
 -- Query Store
-INSERT INTO @DetectedTip (tip_id)
-SELECT 1070 AS tip_id
+INSERT INTO @DetectedTip (tip_id, details)
+SELECT 1070 AS tip_id,
+       NULL AS details
 FROM sys.database_query_store_options
 WHERE actual_state_desc = 'OFF'
 UNION
-SELECT 1071 AS tip_id
+SELECT 1071 AS tip_id,
+       CASE readonly_reason
+           WHEN 1 THEN 'Database is in read-only mode.'
+           WHEN 2 THEN 'Database is in single-user mode.'
+           WHEN 4 THEN 'Database in in emergency mode.'
+           WHEN 8 THEN 'Database is a read-only replica.'
+           WHEN 65536 THEN 'The size of Query Store has reached the limit set by MAX_STORAGE_SIZE_MB option.'
+           WHEN 131072 THEN 'The number of queries in Query Store has reached the limit for the service objective. Remove unneeded queries or scale up to a higher service objective.'
+           WHEN 262144 THEN 'The size of in-memory Query Store data has reached maximum limit. Query Store will be in read-only state while this data is being persisted in the database.'
+           WHEN 524288 THEN 'Database has reached its maximum size limit.'
+       END
+       AS details
 FROM sys.database_query_store_options
 WHERE actual_state_desc = 'READ_ONLY'
 UNION
-SELECT 1072 AS tip_id
+SELECT 1072 AS tip_id,
+       NULL AS details
 FROM sys.database_query_store_options
 WHERE query_capture_mode_desc = 'NONE'
 ;
@@ -165,15 +175,6 @@ FROM sys.databases
 WHERE name = DB_NAME()
       AND
       is_auto_shrink_on = 1
-;
-
--- Page verify
-INSERT INTO @DetectedTip (tip_id)
-SELECT 1090 AS tip_id
-FROM sys.databases
-WHERE name = DB_NAME()
-      AND
-      page_verify_option_desc <> 'CHECKSUM'
 ;
 
 -- Btree indexes with uniqueidentifier leading columns
@@ -296,7 +297,7 @@ WHERE name like 'UserPrimaryGroup.DB%'
 )
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1150 AS tip_id,
-       CONCAT('In the last ', recent_history_duration_minutes, ' minutes, there were ', count_cpu_delayed_intervals, ' occurrences of CPU throttling. On average, CPU was throttled by ', avg_cpu_delay_percent, '%.') AS details
+       CONCAT('In the last ', recent_history_duration_minutes, ' minutes, there were ', count_cpu_delayed_intervals, ' occurrence(s) of CPU throttling. On average, CPU was throttled by ', avg_cpu_delay_percent, '%.') AS details
 FROM cpu_throttling
 WHERE avg_cpu_delay_percent > @CPUThrottlingDelayThresholdPercent
 ;
@@ -453,7 +454,8 @@ SELECT 1180 AS tip_id,
                  CONCAT(CHAR(13), CHAR(10))
                  ) 
                  WITHIN GROUP (ORDER BY object_id, index_name, partition_range, new_compression_type)
-FROM packed_partition_group 
+       AS details
+FROM packed_partition_group
 ;
 
 -- High log rate
@@ -494,7 +496,7 @@ FROM packed_log_rate_snapshot
 )
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1190 AS tip_id,
-       CONCAT('In the last hour, there were  ', count_high_log_write_intervals, ' intervals with log rate staying above ', @HighLogRateThresholdPercent, '%. The longest such interval lasted ', top_log_rate_duration_seconds, ' seconds, and the highest log rate was ', top_log_write_percent, '%.') AS details
+       CONCAT('In the last hour, there were  ', count_high_log_write_intervals, ' interval(s) with log rate staying above ', @HighLogRateThresholdPercent, '%. The longest such interval lasted ', top_log_rate_duration_seconds, ' seconds, and the highest log rate was ', top_log_write_percent, '%.') AS details
 FROM log_rate_top_stat 
 WHERE count_high_log_write_intervals > 0
 ;
@@ -502,20 +504,24 @@ WHERE count_high_log_write_intervals > 0
 -- Return detected tips
 SELECT td.tip_id,
        td.tip_name,
-       td.tip_description,
-       td.sample_command,
-       td.urls,
+       td.tip_url,
        dt.details
 FROM @TipDefinition AS td
-LEFT JOIN @DetectedTip AS dt
-ON dt.tip_id = td.tip_id
-WHERE dt.tip_id IS NOT NULL
+OUTER APPLY (
+            SELECT dt.details AS [processing-instruction(details)]
+            FROM @DetectedTip AS dt
+            WHERE dt.tip_id = td.tip_id
+                  AND
+                  dt.details IS NOT NULL
+            FOR XML PATH (''), TYPE
+            ) dt (details)
+WHERE dt.details IS NOT NULL
       OR
       @ReturnAllTips = 1
-ORDER BY tip_id;
+ORDER BY tip_id
+;
 
 END TRY
 BEGIN CATCH
     THROW;
 END CATCH;
-
