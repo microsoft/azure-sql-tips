@@ -1,16 +1,24 @@
+/*
+Returns a set of tips aiming to improve database design, health, and performance of an Azure SQL DB database or elastic pool.
+For a detailed description, see wiki: https://github.com/microsoft/azure-sql-tools/wiki/Azure-SQL-Database-tips
+
+Latest version of the script is here: https://github.com/microsoft/azure-sql-tools/tree/main/sqldb-tips
+
+v20201209.1
+*/
+
+DECLARE @ReturnAllTips bit = 0; -- Debug flag to return all tips regardless of database state
+
 DECLARE @TipDefinition table (
                              tip_id smallint not null primary key,
                              tip_name nvarchar(50) not null unique,
                              confidence_percent decimal(5,2) not null,
                              tip_url nvarchar(200) not null
                              );
-
 DECLARE @DetectedTip table (
                            tip_id smallint not null primary key,
                            details nvarchar(max) null
                            );
-
-DECLARE @ReturnAllTips bit = 1; -- Debug flag to return all tips regardless of database state
 
 -- Configurable thresholds
 DECLARE @HighLogRateThresholdPercent decimal(5,2) = 80, -- Minimum log rate as percentage of SLO limit that is considered as being too high in the "Log rate close to limit" tip
@@ -20,7 +28,7 @@ DECLARE @HighLogRateThresholdPercent decimal(5,2) = 80, -- Minimum log rate as p
         @UsedToAllocatedSpaceThresholdRatio decimal(3,2) = 0.3, -- The ratio of used space to allocated space that is considered as being too low in the "Allocated space much larger than used space" tip
         @UsedToAllocatedSpaceDbMinSizeMB int = 10240, -- Minimum database size to be considered for the "Allocated space much larger than used space" tip
         @CPUThrottlingDelayThresholdPercent decimal(5,2) = 20, -- Minimum percentage of CPU RG delay to be considered as significant CPU throttling in "Recent CPU throttling" tip
-        @IndexReadWriteThresholdRatio decimal(3,2) = 0.5, -- The ratio of all index reads to index writes that is considered as being too low in the "Low reads nonclustered indexes" tip
+        @IndexReadWriteThresholdRatio decimal(3,2) = 0.1, -- The ratio of all index reads to index writes that is considered as being too low in the "Low reads nonclustered indexes" tip
         @CompressionPartitionUpdateRatioThreshold1 decimal(3,2) = 0.2, -- The maximum ratio of updates to all operations to define "infrequent updates" in the "Data compression opportunities" tip
         @CompressionPartitionUpdateRatioThreshold2 decimal(3,2) = 0.5, -- The maximum ratio of updates to all operations to define "more frequent but not frequent enough updates" in the "Data compression opportunities" tip
         @CompressionPartitionScanRatioThreshold1 decimal(3,2) = 0.5, -- The minimum ratio of scans to all operations to define "frequent enough scans" in the "Data compression opportunities" tip
@@ -28,7 +36,13 @@ DECLARE @HighLogRateThresholdPercent decimal(5,2) = 80, -- Minimum log rate as p
         @CompressionCPUHeadroomThreshold2 decimal(5,2) = 80, -- Minimum CPU usage percentage to be considered as insufficient CPU headroom in the "Data compression opportunities" tip
         @CompressionMinResourceStatSamples smallint = 30, -- Minimum required number of resource stats sampling intervals in the "Data compression opportunities" tip
         @SingleUsePlanSizeThresholdMB int = 512, -- Minimum required per-db size of single-use plans to be considered as significant in the "Plan cache bloat from single-use plans" tip
-        @SingleUseTotalPlanSizeRatioThreshold decimal(3,2) = 0.3 -- The minimum ratio of single-use plans size to total plan size per database to be considered as significant in the "Plan cache bloat from single-use plans" tip
+        @SingleUseTotalPlanSizeRatioThreshold decimal(3,2) = 0.3, -- The minimum ratio of single-use plans size to total plan size per database to be considered as significant in the "Plan cache bloat from single-use plans" tip
+        @MissingIndexAvgUserImpactThreshold decimal(5,2) = 80, -- The minimum user impact for a missing index to be considered as significant in the "Missing indexes" tip
+        @RedoQueueSizeThresholdMB int = 1024, -- The minimum size of redo queue on secondaries to be considered as significant in the "Redo queue is large" tip
+        @GroupIORGAtLimitThresholdRatio decimal(3,2) = 0.9, -- The minimum ratio of governed IOPS issued to workload group IOPS limit that is considered significant in the "IOPS at SLO workload group limit" tip
+        @GroupIORGImpactRatio decimal(3,2) = 0.8, -- The minimum ratio of IO RG delay time to total IO stall time that is considered significant in the "Significant workload group IO RG impact" tip
+        @PoolIORGAtLimitThresholdRatio decimal(3,2) = 0.9, -- The minimum ratio of governed IOPS issued to resource pool IOPS limit that is considered significant in the "IOPS at SLO resource pool limit" tip
+        @PoolIORGImpactRatio decimal(3,2) = 0.8 -- The minimum ratio of IO RG delay time to total IO stall time that is considered significant in the "Significant resource pool IO RG impact" tip
 ;
 
 SET NOCOUNT ON;
@@ -47,7 +61,7 @@ IF IS_ROLEMEMBER('public') <> 1
               )
     THROW 50001, 'Insufficient permissions.', 1;
 
--- Bail out if CPU utilization in the last 1 minute is very high
+-- Bail out if CPU utilization in the last 1 minute is very high to avoid impacting workloads
 IF EXISTS (
           SELECT TOP (4) *
           FROM sys.dm_db_resource_stats
@@ -61,28 +75,35 @@ IF EXISTS (
 -- Define all tips
 INSERT INTO @TipDefinition (tip_id, tip_name, confidence_percent, tip_url)
 VALUES
-(1000, 'Excessive MAXDOP on all replicas', 90, 'https://github.com/microsoft/azure-sql-tools/wiki/Azure-SQL-Database-tips#excessive-maxdop-on-all-replicas'),
-(1010, 'Excessive MAXDOP on primary', 90, 'https://github.com/microsoft/azure-sql-tools/wiki/Azure-SQL-Database-tips#excessive-maxdop-on-primary'),
-(1020, 'Excessive MAXDOP on secondaries', 90, 'https://github.com/microsoft/azure-sql-tools/wiki/Azure-SQL-Database-tips#excessive-maxdop-on-secondaries'),
-(1030, 'Compatibility level is not current', 70, 'https://github.com/microsoft/azure-sql-tools/wiki/Azure-SQL-Database-tips#compatibility-level-is-not-current'),
-(1040, 'Auto-create stats is disabled', 95, 'https://github.com/microsoft/azure-sql-tools/wiki/Azure-SQL-Database-tips#auto-create-stats-is-disabled'),
-(1050, 'Auto-update stats is disabled', 95, 'https://github.com/microsoft/azure-sql-tools/wiki/Azure-SQL-Database-tips#auto-update-stats-is-disabled'),
-(1060, 'RCSI is disabled', 80, 'https://github.com/microsoft/azure-sql-tools/wiki/Azure-SQL-Database-tips#rcsi-is-disabled'),
-(1070, 'Query Store is disabled', 90, 'https://github.com/microsoft/azure-sql-tools/wiki/Azure-SQL-Database-tips#query-store-is-disabled'),
-(1071, 'Query Store is read-only', 90, 'https://github.com/microsoft/azure-sql-tools/wiki/Azure-SQL-Database-tips#query-store-is-read-only'),
-(1072, 'Query Store capture mode is NONE', 90, 'https://github.com/microsoft/azure-sql-tools/wiki/Azure-SQL-Database-tips#query-store-capture-mode-is-none'),
-(1080, 'AUTO_SHRINK is enabled', 99, 'https://github.com/microsoft/azure-sql-tools/wiki/Azure-SQL-Database-tips#auto_shrink-is-enabled'),
-(1100, 'Btree indexes have GUID leading columns', 60, 'https://github.com/microsoft/azure-sql-tools/wiki/Azure-SQL-Database-tips#btree-indexes-have-guid-leading-columns'),
-(1110, 'FLGP auto-tuning is disabled', 95, 'https://github.com/microsoft/azure-sql-tools/wiki/Azure-SQL-Database-tips#flgp-auto-tuning-is-disabled'),
-(1120, 'Used space is close to MAXSIZE', 80, 'https://github.com/microsoft/azure-sql-tools/wiki/Azure-SQL-Database-tips#used-space-is-close-to-maxsize'),
-(1130, 'Allocated space is close to MAXSIZE', 60, 'https://github.com/microsoft/azure-sql-tools/wiki/Azure-SQL-Database-tips#allocated-space-is-close-to-maxsize'),
-(1140, 'Allocated space is much larger than used space', 50, 'https://github.com/microsoft/azure-sql-tools/wiki/Azure-SQL-Database-tips#allocated-space-is-much-larger-than-used-space'),
-(1150, 'Recent CPU throttling found', 90, 'https://github.com/microsoft/azure-sql-tools/wiki/Azure-SQL-Database-tips#recent-cpu-throttling-found'),
-(1160, 'Recent out of memory errors found', 80, 'https://github.com/microsoft/azure-sql-tools/wiki/Azure-SQL-Database-tips#recent-out-of-memory-errors-found'),
-(1170, 'Nonclustered indexes with low reads found', 60, 'https://github.com/microsoft/azure-sql-tools/wiki/Azure-SQL-Database-tips#nonclustered-indexes-with-low-reads-found'),
-(1180, 'Data compression opportunities', 60, 'https://github.com/microsoft/azure-sql-tools/wiki/Azure-SQL-Database-tips#data-compression-opportunities'),
-(1190, 'Log rate is close to limit', 70, 'https://github.com/microsoft/azure-sql-tools/wiki/Azure-SQL-Database-tips#log-rate-is-close-to-limit'),
-(1200, 'Plan cache is bloated by single-use plans', 90, 'https://github.com/microsoft/azure-sql-tools/wiki/Azure-SQL-Database-tips#plan-cache-is-bloated-by-single-use-plans')
+(1000, 'Excessive MAXDOP on all replicas',                   90, 'https://github.com/microsoft/azure-sql-tools/wiki/Azure-SQL-Database-tips#1000'),
+(1010, 'Excessive MAXDOP on primary',                        90, 'https://github.com/microsoft/azure-sql-tools/wiki/Azure-SQL-Database-tips#1010'),
+(1020, 'Excessive MAXDOP on secondaries',                    90, 'https://github.com/microsoft/azure-sql-tools/wiki/Azure-SQL-Database-tips#1020'),
+(1030, 'Compatibility level is not current',                 70, 'https://github.com/microsoft/azure-sql-tools/wiki/Azure-SQL-Database-tips#1030'),
+(1040, 'Auto-create stats is disabled',                      95, 'https://github.com/microsoft/azure-sql-tools/wiki/Azure-SQL-Database-tips#1040'),
+(1050, 'Auto-update stats is disabled',                      95, 'https://github.com/microsoft/azure-sql-tools/wiki/Azure-SQL-Database-tips#1050'),
+(1060, 'RCSI is disabled',                                   80, 'https://github.com/microsoft/azure-sql-tools/wiki/Azure-SQL-Database-tips#1060'),
+(1070, 'Query Store is disabled',                            90, 'https://github.com/microsoft/azure-sql-tools/wiki/Azure-SQL-Database-tips#1070'),
+(1071, 'Query Store is read-only',                           90, 'https://github.com/microsoft/azure-sql-tools/wiki/Azure-SQL-Database-tips#1071'),
+(1072, 'Query Store capture mode is NONE',                   90, 'https://github.com/microsoft/azure-sql-tools/wiki/Azure-SQL-Database-tips#1072'),
+(1080, 'AUTO_SHRINK is enabled',                             99, 'https://github.com/microsoft/azure-sql-tools/wiki/Azure-SQL-Database-tips#1080'),
+(1100, 'Btree indexes have GUID leading columns',            60, 'https://github.com/microsoft/azure-sql-tools/wiki/Azure-SQL-Database-tips#1100'),
+(1110, 'FLGP auto-tuning is disabled',                       95, 'https://github.com/microsoft/azure-sql-tools/wiki/Azure-SQL-Database-tips#1110'),
+(1120, 'Used space is close to MAXSIZE',                     80, 'https://github.com/microsoft/azure-sql-tools/wiki/Azure-SQL-Database-tips#1120'),
+(1130, 'Allocated space is close to MAXSIZE',                60, 'https://github.com/microsoft/azure-sql-tools/wiki/Azure-SQL-Database-tips#1130'),
+(1140, 'Allocated space is much larger than used space',     50, 'https://github.com/microsoft/azure-sql-tools/wiki/Azure-SQL-Database-tips#1140'),
+(1150, 'Recent CPU throttling found',                        90, 'https://github.com/microsoft/azure-sql-tools/wiki/Azure-SQL-Database-tips#1150'),
+(1160, 'Recent out of memory errors found',                  80, 'https://github.com/microsoft/azure-sql-tools/wiki/Azure-SQL-Database-tips#1160'),
+(1165, 'Recent memory grant waits and timeouts found',       70, 'https://github.com/microsoft/azure-sql-tools/wiki/Azure-SQL-Database-tips#1165'),
+(1170, 'Nonclustered indexes with low reads found',          60, 'https://github.com/microsoft/azure-sql-tools/wiki/Azure-SQL-Database-tips#1170'),
+(1180, 'Data compression opportunities',                     60, 'https://github.com/microsoft/azure-sql-tools/wiki/Azure-SQL-Database-tips#1180'),
+(1190, 'Log rate is close to limit',                         70, 'https://github.com/microsoft/azure-sql-tools/wiki/Azure-SQL-Database-tips#1190'),
+(1200, 'Plan cache is bloated by single-use plans',          90, 'https://github.com/microsoft/azure-sql-tools/wiki/Azure-SQL-Database-tips#1200'),
+(1210, 'Missing indexes',                                    70, 'https://github.com/microsoft/azure-sql-tools/wiki/Azure-SQL-Database-tips#1210'),
+(1220, 'Large redo queue',                                   60, 'https://github.com/microsoft/azure-sql-tools/wiki/Azure-SQL-Database-tips#1220'),
+(1230, 'Data IOPS are close to workload group limit',        90, 'https://github.com/microsoft/azure-sql-tools/wiki/Azure-SQL-Database-tips#1230'),
+(1240, 'Workload group IO governance impact is significant', 40, 'https://github.com/microsoft/azure-sql-tools/wiki/Azure-SQL-Database-tips#1240'),
+(1250, 'Data IOPS are close to resource pool limit',         90, 'https://github.com/microsoft/azure-sql-tools/wiki/Azure-SQL-Database-tips#1250'),
+(1260, 'Resouce pool IO governance impact is significant',   40, 'https://github.com/microsoft/azure-sql-tools/wiki/Azure-SQL-Database-tips#1260')
 ;
 
 -- MAXDOP
@@ -155,8 +176,9 @@ WHERE name = DB_NAME()
       is_read_committed_snapshot_on = 0
 ;
 
--- Query Store
-INSERT INTO @DetectedTip (tip_id, details)
+-- Query Store state
+WITH qs AS
+(
 SELECT 1070 AS tip_id,
        NULL AS details
 FROM sys.database_query_store_options
@@ -181,6 +203,11 @@ SELECT 1072 AS tip_id,
        NULL AS details
 FROM sys.database_query_store_options
 WHERE query_capture_mode_desc = 'NONE'
+)
+INSERT INTO @DetectedTip (tip_id, details)
+SELECT  tip_id, details
+FROM qs
+WHERE DATABASEPROPERTYEX(DB_NAME(), 'Updateability') = 'READ_WRITE' -- only produce this on primary
 ;
 
 -- Auto-shrink
@@ -192,7 +219,7 @@ WHERE name = DB_NAME()
       is_auto_shrink_on = 1
 ;
 
--- Btree indexes with uniqueidentifier leading columns
+-- Btree indexes with uniqueidentifier leading column
 WITH object_size AS
 (
 SELECT p.object_id,
@@ -259,7 +286,7 @@ WHERE i.type_desc IN ('CLUSTERED','NONCLUSTERED') -- Btree indexes
 HAVING COUNT(1) > 0
 ;
 
--- APRC
+-- Force plan auto-tuning
 INSERT INTO @DetectedTip (tip_id)
 SELECT 1110 AS tip_id
 FROM sys.database_automatic_tuning_options
@@ -326,7 +353,7 @@ SELECT 1150 AS tip_id,
        CONCAT(
              'In the last ', recent_history_duration_minutes, 
              ' minutes, there were ', count_cpu_delayed_intervals, 
-             ' occurrence(s) of CPU throttling. On average, CPU was throttled by ', avg_cpu_delay_percent, '%.'
+             ' occurrence(s) of CPU throttling. On average, CPU was throttled by ', FORMAT(avg_cpu_delay_percent, '#,0.00'), '%.'
              ) AS details
 FROM cpu_throttling
 WHERE avg_cpu_delay_percent > @CPUThrottlingDelayThresholdPercent
@@ -338,7 +365,8 @@ WITH oom AS
 SELECT SUM(duration_ms) / 60000 AS recent_history_duration_minutes,
        SUM(delta_out_of_memory_count) AS count_oom
 FROM sys.dm_resource_governor_resource_pools_history_ex
-WHERE name LIKE 'SloSharedPool%'
+WHERE -- Consider user resource pool only
+      name LIKE 'SloSharedPool%'
       OR
       name LIKE 'UserPool%'
 )
@@ -347,21 +375,56 @@ SELECT 1160 AS tip_id,
        CONCAT(
              'In the last ', recent_history_duration_minutes, 
              ' minutes, there were ', count_oom, 
-             ' out of memory errors.'
+             ' out of memory errors in the ',
+             IIF(dso.service_objective = 'ElasticPool', CONCAT(QUOTENAME(dso.elastic_pool_name), ' elastic pool.'), CONCAT(QUOTENAME(DB_NAME(dso.database_id)), ' database.'))
              ) AS details
 FROM oom
+CROSS JOIN sys.database_service_objectives AS dso
 WHERE count_oom > 0
+      AND
+      dso.database_id = DB_ID()
+;
+
+-- Recent memory grant waits and timeouts
+WITH memgrant AS
+(
+SELECT SUM(duration_ms) / 60000 AS recent_history_duration_minutes,
+       SUM(delta_memgrant_waiter_count) AS count_memgrant_waiter,
+       SUM(delta_memgrant_timeout_count) AS count_memgrant_timeout
+FROM sys.dm_resource_governor_resource_pools_history_ex
+WHERE -- Consider user resource pool only
+      name LIKE 'SloSharedPool%'
+      OR
+      name LIKE 'UserPool%'
+)
+INSERT INTO @DetectedTip (tip_id, details)
+SELECT 1165 AS tip_id,
+       CONCAT(
+             'In the last ', recent_history_duration_minutes, 
+             ' minutes, there were ', count_memgrant_waiter, 
+             ' requests waiting for a memory grant, and ', count_memgrant_timeout,
+             ' memory grant timeouts in the ',
+             IIF(dso.service_objective = 'ElasticPool', CONCAT(QUOTENAME(dso.elastic_pool_name), ' elastic pool.'), CONCAT(QUOTENAME(DB_NAME(dso.database_id)), ' database.'))
+             ) AS details
+FROM memgrant
+CROSS JOIN sys.database_service_objectives AS dso
+WHERE (count_memgrant_waiter > 0 OR count_memgrant_timeout > 0)
+      AND
+      dso.database_id = DB_ID()
 ;
 
 -- Little used nonclustered indexes
 WITH index_usage AS
 (
-SELECT STRING_AGG(CONCAT(
-                        QUOTENAME(OBJECT_SCHEMA_NAME(o.object_id)) COLLATE DATABASE_DEFAULT, '.', 
-                        QUOTENAME(o.name) COLLATE DATABASE_DEFAULT, '.', 
-                        QUOTENAME(i.name) COLLATE DATABASE_DEFAULT, 
-                        ' (reads: ', ius.user_seeks + ius.user_scans + ius.user_lookups, ' writes: ', ius.user_updates, ')'
-                        ), CONCAT(CHAR(13), CHAR(10))) AS details
+SELECT STRING_AGG(
+                 CAST(CONCAT(
+                            QUOTENAME(OBJECT_SCHEMA_NAME(o.object_id)) COLLATE DATABASE_DEFAULT, '.', 
+                            QUOTENAME(o.name) COLLATE DATABASE_DEFAULT, '.', 
+                            QUOTENAME(i.name) COLLATE DATABASE_DEFAULT, 
+                            ' (reads: ', FORMAT(ius.user_seeks + ius.user_scans + ius.user_lookups, '#,0'), ' writes: ', FORMAT(ius.user_updates, '#,0'), ')'
+                            ) AS nvarchar(max)), 
+                 CONCAT(CHAR(13), CHAR(10))
+                 ) AS details
 FROM sys.dm_db_index_usage_stats AS ius
 INNER JOIN sys.indexes AS i
 ON ius.object_id = i.object_id
@@ -381,11 +444,11 @@ WHERE ius.database_id = DB_ID()
       AND
       o.is_ms_shipped = 0
       AND
-      (ius.user_seeks + ius.user_scans + ius.user_lookups) * @IndexReadWriteThresholdRatio < ius.user_updates
+      (ius.user_seeks + ius.user_scans + ius.user_lookups) * 1. / NULLIF(ius.user_updates, 0) < @IndexReadWriteThresholdRatio
 )
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1170 AS tip_id,
-       CONCAT('For time period starting from ', CONVERT(varchar(20), sqlserver_start_time, 120), ':', CHAR(13), CHAR(10), iu.details) AS details
+       CONCAT('For time period starting from ', CONVERT(varchar(20), si.sqlserver_start_time, 120), ':', CHAR(13), CHAR(10), iu.details) AS details
 FROM index_usage AS iu
 CROSS JOIN sys.dm_os_sys_info AS si
 WHERE iu.details IS NOT NULL
@@ -425,8 +488,8 @@ SELECT o.object_id,
        i.name AS index_name,
        p.partition_number,
        p.partition_size_mb,
-       ios.leaf_update_count / NULLIF((ios.range_scan_count + ios.leaf_insert_count + ios.leaf_delete_count + ios.leaf_update_count + ios.leaf_page_merge_count + ios.singleton_lookup_count), 0) AS update_ratio,
-       ios.range_scan_count / NULLIF((ios.range_scan_count + ios.leaf_insert_count + ios.leaf_delete_count + ios.leaf_update_count + ios.leaf_page_merge_count + ios.singleton_lookup_count), 0) AS scan_ratio
+       ios.leaf_update_count * 1. / NULLIF((ios.range_scan_count + ios.leaf_insert_count + ios.leaf_delete_count + ios.leaf_update_count + ios.leaf_page_merge_count + ios.singleton_lookup_count), 0) AS update_ratio,
+       ios.range_scan_count * 1. / NULLIF((ios.range_scan_count + ios.leaf_insert_count + ios.leaf_delete_count + ios.leaf_update_count + ios.leaf_page_merge_count + ios.singleton_lookup_count), 0) AS scan_ratio
 FROM sys.objects AS o
 INNER JOIN sys.indexes AS i
 ON o.object_id = i.object_id
@@ -516,14 +579,14 @@ GROUP BY object_id,
          new_compression_type,
          interval_group
 HAVING COUNT(1) > 0
-)
-INSERT INTO @DetectedTip (tip_id, details)
-SELECT 1180 AS tip_id,
-       STRING_AGG(
+),
+packed_partition_group_agg AS
+(
+SELECT STRING_AGG(
                  CAST(CONCAT(
                             'schema: ', QUOTENAME(OBJECT_SCHEMA_NAME(object_id)), 
                             ', object: ', QUOTENAME(OBJECT_NAME(object_id)), 
-                            ', index: ', QUOTENAME(index_name), 
+                            ', index: ', ISNULL(QUOTENAME(index_name), '<Heap>'), 
                             ', partition range: ', partition_range, 
                             ', partition range size (MB): ', FORMAT(partition_range_size_mb, 'N'), 
                             ', new compression type: ', new_compression_type
@@ -533,6 +596,14 @@ SELECT 1180 AS tip_id,
                  WITHIN GROUP (ORDER BY object_id, index_name, partition_range, partition_range_size_mb, new_compression_type)
        AS details
 FROM packed_partition_group
+HAVING COUNT(1) > 0
+)
+INSERT INTO @DetectedTip (tip_id, details)
+SELECT 1180 AS tip_id,
+       CONCAT('For time period starting from ', CONVERT(varchar(20), si.sqlserver_start_time, 120), ':', CHAR(13), CHAR(10), ppga.details) AS details
+FROM packed_partition_group_agg AS ppga
+CROSS JOIN sys.dm_os_sys_info AS si
+WHERE ppga.details IS NOT NULL
 ;
 
 -- High log rate
@@ -543,6 +614,7 @@ SELECT end_time,
        avg_log_write_percent,
        IIF(avg_log_write_percent > @HighLogRateThresholdPercent, 1, 0) AS high_log_rate_indicator
 FROM sys.dm_db_resource_stats
+WHERE DATABASEPROPERTYEX(DB_NAME(), 'Updateability') = 'READ_WRITE' -- only produce this on primary
 ),
 pre_packed_log_rate_snapshot AS
 (
@@ -576,8 +648,8 @@ SELECT 1190 AS tip_id,
        CONCAT(
              'In the last hour, there were  ', count_high_log_write_intervals, 
              ' interval(s) with log rate staying above ', @HighLogRateThresholdPercent, 
-             '%. The longest such interval lasted ', top_log_rate_duration_seconds, 
-             ' seconds, and the highest log rate was ', top_log_write_percent, 
+             '%. The longest such interval lasted ', FORMAT(top_log_rate_duration_seconds, '#,0'),
+             ' seconds, and the highest log rate was ', FORMAT(top_log_write_percent, '#,0.00'),
              '%.'
              ) AS details
 FROM log_rate_top_stat 
@@ -604,13 +676,10 @@ INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1200 AS tip_id,
        STRING_AGG(
                  CAST(CONCAT(
-                            'database (id: ',
-                            database_id,
-                            ', name: ' + database_name, -- database name is only available for current database, include for usability if available
-                            '), single use plans take ',
-                            FORMAT(single_use_db_plan_cache_size_mb, 'N'),
-                            ' MB, or ',
-                            FORMAT(single_use_db_plan_cache_size_mb / total_db_plan_cache_size_mb, 'P'),
+                            'database (id: ', database_id,
+                            ', name: ' + QUOTENAME(database_name), -- database name is only available for current database, include for usability if available
+                            '), single use plans take ', FORMAT(single_use_db_plan_cache_size_mb, 'N'),
+                            ' MB, or ', FORMAT(single_use_db_plan_cache_size_mb / total_db_plan_cache_size_mb, 'P'),
                             ' of total cached plans for this database.'
                             ) AS nvarchar(max)),
                  CONCAT(CHAR(13), CHAR(10))
@@ -620,8 +689,454 @@ SELECT 1200 AS tip_id,
 FROM plan_cache_db_summary
 WHERE single_use_db_plan_cache_size_mb >= @SingleUsePlanSizeThresholdMB -- sufficiently large total size of single-use plans for a database
       AND
-      single_use_db_plan_cache_size_mb / total_db_plan_cache_size_mb > @SingleUseTotalPlanSizeRatioThreshold -- single-use plans take more than n% of total plan cache size
+      single_use_db_plan_cache_size_mb * 1. / total_db_plan_cache_size_mb > @SingleUseTotalPlanSizeRatioThreshold -- single-use plans take more than n% of total plan cache size
 HAVING COUNT(1) > 0
+;
+
+-- Missing indexes
+WITH missing_index_agg AS
+(
+SELECT STRING_AGG(
+                 CAST(CONCAT(
+                            'object_name: ',
+                            d.statement,
+                            ', equality columns: ' + d.equality_columns,
+                            ', inequality columns: ' + d.inequality_columns,
+                            ', included columns: ' + d.included_columns,
+                            ', unique compiles: ', FORMAT(gs.unique_compiles, '#,0'),
+                            ', user seeks: ', FORMAT(gs.user_seeks, '#,0'),
+                            ', user scans: ', FORMAT(gs.user_scans, '#,0'),
+                            ', avg user impact: ', gs.avg_user_impact, '%.'
+                            ) AS nvarchar(max)),
+                 CONCAT(CHAR(13), CHAR(10))
+                 ) 
+                 WITHIN GROUP (ORDER BY avg_user_impact DESC, statement)
+       AS details
+FROM sys.dm_db_missing_index_group_stats AS gs
+INNER JOIN sys.dm_db_missing_index_groups AS g
+ON gs.group_handle = g.index_group_handle
+INNER JOIN sys.dm_db_missing_index_details AS d
+ON g.index_handle = d.index_handle
+WHERE gs.avg_user_impact > @MissingIndexAvgUserImpactThreshold
+HAVING COUNT(1) > 0
+)
+INSERT INTO @DetectedTip (tip_id, details)
+SELECT 1210 AS tip_id,
+       CONCAT('For time period starting from ', CONVERT(varchar(20), si.sqlserver_start_time, 120), ':', CHAR(13), CHAR(10), mia.details) AS details
+FROM missing_index_agg AS mia
+CROSS JOIN sys.dm_os_sys_info AS si
+WHERE mia.details IS NOT NULL
+;
+
+-- Redo queue is large
+INSERT INTO @DetectedTip (tip_id, details)
+SELECT 1220 AS tip_id,
+       CONCAT(
+             'Current redo queue size: ',
+             FORMAT(redo_queue_size / 1024., 'N'),
+             ' MB. Most recent sampling of redo rate: ',
+             FORMAT(redo_rate / 1024., 'N'),
+             ' MB/s.'
+             )
+       AS details
+FROM sys.dm_database_replica_states
+WHERE DATABASEPROPERTYEX(DB_NAME(), 'Edition') IN ('Premium','BusinessCritical')
+      AND
+      is_primary_replica = 0
+      AND
+      is_local = 1
+      AND
+      redo_queue_size / 1024. > @RedoQueueSizeThresholdMB
+;
+
+-- Data IO reaching user workload group SLO limit, or significant IO RG impact at user workload group level
+WITH
+io_rg_snapshot AS
+(
+SELECT wgh.snapshot_time,
+       wgh.duration_ms,
+       wgh.delta_reads_issued / (wgh.duration_ms / 1000.) AS read_iops,
+       wgh.delta_writes_issued / (wgh.duration_ms / 1000.) AS write_iops, -- this is commonly zero, most writes are background writes to data files
+       (wgh.reads_throttled - LAG(wgh.reads_throttled) OVER (ORDER BY snapshot_time)) / (wgh.duration_ms / 1000.) AS read_iops_throttled, -- SQL IO RG throttling, not storage throttling
+       (wgh.delta_read_bytes / (wgh.duration_ms / 1000.)) / 1024. / 1024 AS read_throughput_mbps,
+       wgh.delta_background_writes / (wgh.duration_ms / 1000.) AS background_write_iops, -- checkpoint, lazy writer, PVS
+       (wgh.delta_background_write_bytes / (wgh.duration_ms / 1000.)) / 1024. / 1024 AS background_write_throughput_mbps,
+       wgh.delta_read_stall_queued_ms, -- time spent in SQL IO RG
+       wgh.delta_read_stall_ms, -- total time spent completing the IO, including SQL IO RG time
+       rg.primary_group_max_io, -- workload group IOPS limit
+       IIF(
+          wgh.delta_reads_issued
+          +
+          IIF(rg.govern_background_io = 0, wgh.delta_background_writes, 0) -- depending on SLO, background write IO may or may not be accounted toward workload group IOPS limit
+          >
+          rg.primary_group_max_io * wgh.duration_ms / 1000 * @GroupIORGAtLimitThresholdRatio, -- over n% of IOPS budget for this interval 
+          1,
+          0
+          ) AS reached_iops_limit_indicator,
+       IIF(
+          wgh.delta_read_stall_queued_ms * 1. / NULLIF(wgh.delta_read_stall_ms, 0)
+          >
+          @GroupIORGImpactRatio,
+          1,
+          0
+          ) AS significant_io_rg_impact_indicator -- over n% of IO stall is spent in SQL IO RG
+FROM sys.dm_resource_governor_workload_groups_history_ex AS wgh
+CROSS JOIN sys.dm_user_db_resource_governance AS rg
+WHERE rg.database_id = DB_ID()
+      AND
+      wgh.name like 'UserPrimaryGroup.DB%'
+),
+pre_packed_io_rg_snapshot AS
+(
+SELECT SUM(duration_ms) OVER (ORDER BY (SELECT 'no order')) / 60000 AS recent_history_duration_minutes,
+       snapshot_time,
+       read_iops,
+       write_iops,
+       read_iops_throttled,
+       background_write_iops,
+       delta_read_stall_queued_ms,
+       delta_read_stall_ms,
+       read_throughput_mbps,
+       background_write_throughput_mbps,
+       primary_group_max_io,
+       reached_iops_limit_indicator,
+       significant_io_rg_impact_indicator,
+       ROW_NUMBER() OVER (ORDER BY snapshot_time) -- row number across all readings, in increasing chronological order
+       -
+       SUM(reached_iops_limit_indicator) OVER (ORDER BY snapshot_time ROWS UNBOUNDED PRECEDING) -- running count of all intervals where the threshold was exceeded
+       AS limit_grouping_helper, -- this difference remains constant while the threshold is exceeded, and can be used to collapse/pack an interval using aggregation
+       ROW_NUMBER() OVER (ORDER BY snapshot_time)
+       -
+       SUM(significant_io_rg_impact_indicator) OVER (ORDER BY snapshot_time ROWS UNBOUNDED PRECEDING)
+       AS impact_grouping_helper
+FROM io_rg_snapshot
+WHERE read_iops_throttled IS NOT NULL -- discard the earliest row where the difference with previous snapshot is not defined
+),
+-- each row is an interval where IOPS was continuously at limit, with aggregated IO stats
+packed_io_rg_snapshot_limit AS
+(
+SELECT MIN(recent_history_duration_minutes) AS recent_history_duration_minutes,
+       MIN(snapshot_time) AS min_snapshot_time,
+       MAX(snapshot_time) AS max_snapshot_time,
+       SUM(delta_read_stall_queued_ms) AS total_read_throttled_time_ms,
+       SUM(delta_read_stall_ms) AS total_read_time_ms,
+       AVG(read_iops) AS avg_read_iops,
+       MAX(read_iops) AS max_read_iops,
+       AVG(write_iops) AS avg_write_iops,
+       MAX(write_iops) AS max_write_iops,
+       AVG(background_write_iops) AS avg_background_write_iops,
+       MAX(background_write_iops) AS max_background_write_iops,
+       AVG(read_iops_throttled) AS avg_read_iops_throttled,
+       MAX(read_iops_throttled) AS max_read_iops_throttled,
+       AVG(read_throughput_mbps) AS avg_read_throughput_mbps,
+       MAX(read_throughput_mbps) AS max_read_throughput_mbps,
+       AVG(background_write_throughput_mbps) AS avg_background_write_throughput_mbps,
+       MAX(background_write_throughput_mbps) AS max_background_write_throughput_mbps,
+       MIN(primary_group_max_io) AS primary_group_max_io
+FROM pre_packed_io_rg_snapshot
+WHERE reached_iops_limit_indicator = 1
+GROUP BY limit_grouping_helper
+),
+-- each row is an interval where IO RG impact remained over the significance threshold, with aggregated IO stats
+packed_io_rg_snapshot_impact AS
+(
+SELECT MIN(recent_history_duration_minutes) AS recent_history_duration_minutes,
+       MIN(snapshot_time) AS min_snapshot_time,
+       MAX(snapshot_time) AS max_snapshot_time,
+       SUM(delta_read_stall_queued_ms) AS total_read_throttled_time_ms,
+       SUM(delta_read_stall_ms) AS total_read_time_ms,
+       AVG(read_iops) AS avg_read_iops,
+       MAX(read_iops) AS max_read_iops,
+       AVG(write_iops) AS avg_write_iops,
+       MAX(write_iops) AS max_write_iops,
+       AVG(background_write_iops) AS avg_background_write_iops,
+       MAX(background_write_iops) AS max_background_write_iops,
+       AVG(read_iops_throttled) AS avg_read_iops_throttled,
+       MAX(read_iops_throttled) AS max_read_iops_throttled,
+       AVG(read_throughput_mbps) AS avg_read_throughput_mbps,
+       MAX(read_throughput_mbps) AS max_read_throughput_mbps,
+       AVG(background_write_throughput_mbps) AS avg_background_write_throughput_mbps,
+       MAX(background_write_throughput_mbps) AS max_background_write_throughput_mbps,
+       MIN(primary_group_max_io) AS primary_group_max_io
+FROM pre_packed_io_rg_snapshot
+WHERE significant_io_rg_impact_indicator = 1
+GROUP BY impact_grouping_helper
+),
+-- one row, a summary across all intervals where IOPS was continuously at limit
+packed_io_rg_snapshot_limit_agg AS
+(
+SELECT MIN(recent_history_duration_minutes) AS recent_history_duration_minutes,
+       MAX(DATEDIFF(second, min_snapshot_time, max_snapshot_time)) AS longest_io_rg_at_limit_duration_seconds,
+       COUNT(1) AS count_io_rg_at_limit_intervals,
+       SUM(total_read_time_ms) AS total_read_time_ms,
+       SUM(total_read_throttled_time_ms) AS total_read_throttled_time_ms,
+       AVG(avg_read_iops) AS avg_read_iops,
+       MAX(max_read_iops) AS max_read_iops,
+       AVG(avg_write_iops) AS avg_write_iops,
+       MAX(max_write_iops) AS max_write_iops,
+       AVG(avg_background_write_iops) AS avg_background_write_iops,
+       MAX(max_background_write_iops) AS max_background_write_iops,
+       AVG(avg_read_throughput_mbps) AS avg_read_throughput_mbps,
+       MAX(max_read_throughput_mbps) AS max_read_throughput_mbps,
+       AVG(avg_background_write_throughput_mbps) AS avg_background_write_throughput_mbps,
+       MAX(max_background_write_throughput_mbps) AS max_background_write_throughput_mbps,
+       MIN(primary_group_max_io) AS primary_group_max_io
+FROM packed_io_rg_snapshot_limit
+),
+-- one row, a summary across all intervals where IO RG impact remained over the significance threshold
+packed_io_rg_snapshot_impact_agg AS
+(
+SELECT MIN(recent_history_duration_minutes) AS recent_history_duration_minutes,
+       MAX(DATEDIFF(second, min_snapshot_time, max_snapshot_time)) AS longest_io_rg_impact_duration_seconds,
+       COUNT(1) AS count_io_rg_impact_intervals,
+       SUM(total_read_time_ms) AS total_read_time_ms,
+       SUM(total_read_throttled_time_ms) AS total_read_throttled_time_ms,
+       AVG(avg_read_iops) AS avg_read_iops,
+       MAX(max_read_iops) AS max_read_iops,
+       AVG(avg_write_iops) AS avg_write_iops,
+       MAX(max_write_iops) AS max_write_iops,
+       AVG(avg_background_write_iops) AS avg_background_write_iops,
+       MAX(max_background_write_iops) AS max_background_write_iops,
+       AVG(avg_read_throughput_mbps) AS avg_read_throughput_mbps,
+       MAX(max_read_throughput_mbps) AS max_read_throughput_mbps,
+       AVG(avg_background_write_throughput_mbps) AS avg_background_write_throughput_mbps,
+       MAX(max_background_write_throughput_mbps) AS max_background_write_throughput_mbps
+FROM packed_io_rg_snapshot_impact
+)
+INSERT INTO @DetectedTip (tip_id, details)
+SELECT 1230 AS tip_id,
+       CONCAT(
+             'In the last ', recent_history_duration_minutes,
+             ' minutes, there were ', count_io_rg_at_limit_intervals, 
+             ' time interval(s) when total data IO approached the workload group (database-level) IOPS limit of the service objective, ', FORMAT(primary_group_max_io, '#,0'), ' IOPS.', CHAR(13), CHAR(10),
+             'Across these intervals, aggregate IO statistics were: ', CHAR(13), CHAR(10),
+             'longest interval duration: ', FORMAT(longest_io_rg_at_limit_duration_seconds, '#,0'), ' seconds; ', CHAR(13), CHAR(10),
+             'total read IO time: ', FORMAT(total_read_time_ms, '#,0'), ' milliseconds; ', CHAR(13), CHAR(10),
+             'total throttled read IO time: ', FORMAT(total_read_throttled_time_ms, '#,0'), ' milliseconds; ', CHAR(13), CHAR(10),
+             'average read IOPS: ', FORMAT(avg_read_iops, '#,0'), '; ', CHAR(13), CHAR(10),
+             'maximum read IOPS: ', FORMAT(max_read_iops, '#,0'), '; ', CHAR(13), CHAR(10),
+             'average write IOPS: ', FORMAT(avg_write_iops, '#,0'), '; ', CHAR(13), CHAR(10),
+             'maximum write IOPS: ', FORMAT(max_write_iops, '#,0'), '; ', CHAR(13), CHAR(10),
+             'average background write IOPS: ', FORMAT(avg_background_write_iops, '#,0'), '; ', CHAR(13), CHAR(10),
+             'maximum background write IOPS: ', FORMAT(max_background_write_iops, '#,0'), '; ', CHAR(13), CHAR(10),
+             'average read IO throughput: ', FORMAT(avg_read_throughput_mbps, '#,0.00'), ' MBps; ', CHAR(13), CHAR(10),
+             'maximum read IO throughput: ', FORMAT(max_read_throughput_mbps, '#,0.00'), ' MBps; ', CHAR(13), CHAR(10),
+             'average background write IO throughput: ', FORMAT(avg_background_write_throughput_mbps, '#,0.00'), ' MBps; ', CHAR(13), CHAR(10),
+             'maximum background write IO throughput: ', FORMAT(max_background_write_throughput_mbps, '#,0.00'), ' MBps.'
+             )
+       AS details
+FROM packed_io_rg_snapshot_limit_agg
+WHERE count_io_rg_at_limit_intervals > 0
+UNION
+SELECT 1240 AS tip_id,
+       CONCAT(
+             'In the last ', recent_history_duration_minutes,
+             ' minutes, there were ', count_io_rg_impact_intervals, 
+             ' time interval(s) when workload group (database-level) resource governance for the service objective was significantly delaying IO.', CHAR(13), CHAR(10),
+             'Across these intervals, aggregate IO statistics were: ', CHAR(13), CHAR(10),
+             'longest interval duration: ', FORMAT(longest_io_rg_impact_duration_seconds, '#,0'), ' seconds; ', CHAR(13), CHAR(10),
+             'total read IO time: ', FORMAT(total_read_time_ms, '#,0'), ' milliseconds; ', CHAR(13), CHAR(10),
+             'total throttled read IO time: ', FORMAT(total_read_throttled_time_ms, '#,0'), ' milliseconds; ', CHAR(13), CHAR(10),
+             'average read IOPS: ', FORMAT(avg_read_iops, '#,0'), '; ', CHAR(13), CHAR(10),
+             'maximum read IOPS: ', FORMAT(max_read_iops, '#,0'), '; ', CHAR(13), CHAR(10),
+             'average write IOPS: ', FORMAT(avg_write_iops, '#,0'), '; ', CHAR(13), CHAR(10),
+             'maximum write IOPS: ', FORMAT(max_write_iops, '#,0'), '; ', CHAR(13), CHAR(10),
+             'average background write IOPS: ', FORMAT(avg_background_write_iops, '#,0'), '; ', CHAR(13), CHAR(10),
+             'maximum background write IOPS: ', FORMAT(max_background_write_iops, '#,0'), '; ', CHAR(13), CHAR(10),
+             'average read IO throughput: ', FORMAT(avg_read_throughput_mbps, '#,0.00'), ' MBps; ', CHAR(13), CHAR(10),
+             'maximum read IO throughput: ', FORMAT(max_read_throughput_mbps, '#,0.00'), ' MBps; ', CHAR(13), CHAR(10),
+             'average background write IO throughput: ', FORMAT(avg_background_write_throughput_mbps, '#,0.00'), ' MBps; ', CHAR(13), CHAR(10),
+             'maximum background write IO throughput: ', FORMAT(max_background_write_throughput_mbps, '#,0.00'), ' MBps.'
+             )
+       AS details
+FROM packed_io_rg_snapshot_impact_agg
+WHERE count_io_rg_impact_intervals > 0
+;
+
+-- Data IO reaching user resource pool SLO limit, or significant IO RG impact at user resource pool level
+WITH
+io_rg_snapshot AS
+(
+SELECT rph.snapshot_time,
+       rph.duration_ms,
+       rph.delta_read_io_issued / (rph.duration_ms / 1000.) AS read_iops,
+       rph.delta_write_io_issued / (rph.duration_ms / 1000.) AS write_iops, -- this is commonly zero, most writes are background writes to data files
+       rph.delta_read_io_throttled / (rph.duration_ms / 1000.) AS read_iops_throttled, -- SQL IO RG throttling, not storage throttling
+       (rph.delta_read_bytes / (rph.duration_ms / 1000.)) / 1024. / 1024 AS read_throughput_mbps,
+       rph.delta_read_io_stall_queued_ms, -- time spent in SQL IO RG
+       rph.delta_read_io_stall_ms, -- total time spent completing the IO, including SQL IO RG time
+       rg.pool_max_io, -- resource pool IOPS limit
+       IIF(
+          rph.delta_read_io_issued
+          >
+          rg.pool_max_io * rph.duration_ms / 1000 * @PoolIORGAtLimitThresholdRatio, -- over n% of IOPS budget for this interval 
+          1,
+          0
+          ) AS reached_iops_limit_indicator,
+       IIF(
+          rph.delta_read_io_stall_queued_ms * 1. / NULLIF(rph.delta_read_io_stall_ms, 0)
+          >
+          @PoolIORGImpactRatio,
+          1,
+          0
+          ) AS significant_io_rg_impact_indicator -- over n% of IO stall is spent in SQL IO RG
+FROM sys.dm_resource_governor_resource_pools_history_ex AS rph
+CROSS JOIN sys.dm_user_db_resource_governance AS rg
+WHERE rg.database_id = DB_ID()
+      AND
+      -- Consider user resource pool only
+      (
+      rph.name LIKE 'SloSharedPool%'
+      OR
+      rph.name LIKE 'UserPool%'
+      )
+      AND
+      rg.pool_max_io > 0 -- resource pool IO is governed
+),
+pre_packed_io_rg_snapshot AS
+(
+SELECT SUM(duration_ms) OVER (ORDER BY (SELECT 'no order')) / 60000 AS recent_history_duration_minutes,
+       snapshot_time,
+       read_iops,
+       write_iops,
+       read_iops_throttled,
+       delta_read_io_stall_queued_ms,
+       delta_read_io_stall_ms,
+       read_throughput_mbps,
+       pool_max_io,
+       reached_iops_limit_indicator,
+       significant_io_rg_impact_indicator,
+       ROW_NUMBER() OVER (ORDER BY snapshot_time) -- row number across all readings, in increasing chronological order
+       -
+       SUM(reached_iops_limit_indicator) OVER (ORDER BY snapshot_time ROWS UNBOUNDED PRECEDING) -- running count of all intervals where the threshold was exceeded
+       AS limit_grouping_helper, -- this difference remains constant while the threshold is exceeded, and can be used to collapse/pack an interval using aggregation
+       ROW_NUMBER() OVER (ORDER BY snapshot_time)
+       -
+       SUM(significant_io_rg_impact_indicator) OVER (ORDER BY snapshot_time ROWS UNBOUNDED PRECEDING)
+       AS impact_grouping_helper
+FROM io_rg_snapshot
+),
+-- each row is an interval where IOPS was continuously at limit, with aggregated IO stats
+packed_io_rg_snapshot_limit AS
+(
+SELECT MIN(recent_history_duration_minutes) AS recent_history_duration_minutes,
+       MIN(snapshot_time) AS min_snapshot_time,
+       MAX(snapshot_time) AS max_snapshot_time,
+       SUM(delta_read_io_stall_queued_ms) AS total_read_throttled_time_ms,
+       SUM(delta_read_io_stall_ms) AS total_read_time_ms,
+       AVG(read_iops) AS avg_read_iops,
+       MAX(read_iops) AS max_read_iops,
+       AVG(write_iops) AS avg_write_iops,
+       MAX(write_iops) AS max_write_iops,
+       AVG(read_iops_throttled) AS avg_read_iops_throttled,
+       MAX(read_iops_throttled) AS max_read_iops_throttled,
+       AVG(read_throughput_mbps) AS avg_read_throughput_mbps,
+       MAX(read_throughput_mbps) AS max_read_throughput_mbps,
+       MIN(pool_max_io) AS pool_max_io
+FROM pre_packed_io_rg_snapshot
+WHERE reached_iops_limit_indicator = 1
+GROUP BY limit_grouping_helper
+),
+-- each row is an interval where IO RG impact remained over the significance threshold, with aggregated IO stats
+packed_io_rg_snapshot_impact AS
+(
+SELECT MIN(recent_history_duration_minutes) AS recent_history_duration_minutes,
+       MIN(snapshot_time) AS min_snapshot_time,
+       MAX(snapshot_time) AS max_snapshot_time,
+       SUM(delta_read_io_stall_queued_ms) AS total_read_throttled_time_ms,
+       SUM(delta_read_io_stall_ms) AS total_read_time_ms,
+       AVG(read_iops) AS avg_read_iops,
+       MAX(read_iops) AS max_read_iops,
+       AVG(write_iops) AS avg_write_iops,
+       MAX(write_iops) AS max_write_iops,
+       AVG(read_iops_throttled) AS avg_read_iops_throttled,
+       MAX(read_iops_throttled) AS max_read_iops_throttled,
+       AVG(read_throughput_mbps) AS avg_read_throughput_mbps,
+       MAX(read_throughput_mbps) AS max_read_throughput_mbps,
+       MIN(pool_max_io) AS pool_max_io
+FROM pre_packed_io_rg_snapshot
+WHERE significant_io_rg_impact_indicator = 1
+GROUP BY impact_grouping_helper
+),
+-- one row, a summary across all intervals where IOPS was continuously at limit
+packed_io_rg_snapshot_limit_agg AS
+(
+SELECT MIN(recent_history_duration_minutes) AS recent_history_duration_minutes,
+       MAX(DATEDIFF(second, min_snapshot_time, max_snapshot_time)) AS longest_io_rg_at_limit_duration_seconds,
+       COUNT(1) AS count_io_rg_at_limit_intervals,
+       SUM(total_read_time_ms) AS total_read_time_ms,
+       SUM(total_read_throttled_time_ms) AS total_read_throttled_time_ms,
+       AVG(avg_read_iops) AS avg_read_iops,
+       MAX(max_read_iops) AS max_read_iops,
+       AVG(avg_write_iops) AS avg_write_iops,
+       MAX(max_write_iops) AS max_write_iops,
+       AVG(avg_read_throughput_mbps) AS avg_read_throughput_mbps,
+       MAX(max_read_throughput_mbps) AS max_read_throughput_mbps,
+       MIN(pool_max_io) AS pool_max_io
+FROM packed_io_rg_snapshot_limit
+),
+-- one row, a summary across all intervals where IO RG impact remained over the significance threshold
+packed_io_rg_snapshot_impact_agg AS
+(
+SELECT MIN(recent_history_duration_minutes) AS recent_history_duration_minutes,
+       MAX(DATEDIFF(second, min_snapshot_time, max_snapshot_time)) AS longest_io_rg_impact_duration_seconds,
+       COUNT(1) AS count_io_rg_impact_intervals,
+       SUM(total_read_time_ms) AS total_read_time_ms,
+       SUM(total_read_throttled_time_ms) AS total_read_throttled_time_ms,
+       AVG(avg_read_iops) AS avg_read_iops,
+       MAX(max_read_iops) AS max_read_iops,
+       AVG(avg_write_iops) AS avg_write_iops,
+       MAX(max_write_iops) AS max_write_iops,
+       AVG(avg_read_throughput_mbps) AS avg_read_throughput_mbps,
+       MAX(max_read_throughput_mbps) AS max_read_throughput_mbps
+FROM packed_io_rg_snapshot_impact
+)
+INSERT INTO @DetectedTip (tip_id, details)
+SELECT 1250 AS tip_id,
+       CONCAT(
+             'In the last ', l.recent_history_duration_minutes,
+             ' minutes, there were ', l.count_io_rg_at_limit_intervals, 
+             ' time interval(s) when total data IO approached the resource pool IOPS limit of the service objective ', IIF(dso.service_objective = 'ElasticPool', CONCAT('for elastic pool ', QUOTENAME(dso.elastic_pool_name)), ''), ', ', FORMAT(l.pool_max_io, '#,0'), ' IOPS.', CHAR(13), CHAR(10),
+             'Across these intervals, aggregate IO statistics were: ', CHAR(13), CHAR(10),
+             'longest interval duration: ', FORMAT(l.longest_io_rg_at_limit_duration_seconds, '#,0'), ' seconds; ', CHAR(13), CHAR(10),
+             'total read IO time: ', FORMAT(l.total_read_time_ms, '#,0'), ' milliseconds; ', CHAR(13), CHAR(10),
+             'total throttled read IO time: ', FORMAT(l.total_read_throttled_time_ms, '#,0'), ' milliseconds; ', CHAR(13), CHAR(10),
+             'average read IOPS: ', FORMAT(l.avg_read_iops, '#,0'), '; ', CHAR(13), CHAR(10),
+             'maximum read IOPS: ', FORMAT(l.max_read_iops, '#,0'), '; ', CHAR(13), CHAR(10),
+             'average write IOPS: ', FORMAT(l.avg_write_iops, '#,0'), '; ', CHAR(13), CHAR(10),
+             'maximum write IOPS: ', FORMAT(l.max_write_iops, '#,0'), '; ', CHAR(13), CHAR(10),
+             'average read IO throughput: ', FORMAT(l.avg_read_throughput_mbps, '#,0.00'), ' MBps; ', CHAR(13), CHAR(10),
+             'maximum read IO throughput: ', FORMAT(l.max_read_throughput_mbps, '#,0.00'), ' MBps.'
+             )
+       AS details
+FROM packed_io_rg_snapshot_limit_agg AS l
+CROSS JOIN sys.database_service_objectives AS dso
+WHERE l.count_io_rg_at_limit_intervals > 0
+      AND
+      dso.database_id = DB_ID()
+UNION
+SELECT 1260 AS tip_id,
+       CONCAT(
+             'In the last ', i.recent_history_duration_minutes,
+             ' minutes, there were ', i.count_io_rg_impact_intervals, 
+             ' time interval(s) when resource pool resource governance for the service objective was significantly delaying IO', IIF(dso.service_objective = 'ElasticPool', CONCAT(' for elastic pool ', QUOTENAME(dso.elastic_pool_name)), ''), '.', CHAR(13), CHAR(10),
+             'Across these intervals, aggregate IO statistics were: ', CHAR(13), CHAR(10),
+             'longest interval duration: ', FORMAT(i.longest_io_rg_impact_duration_seconds, '#,0'), ' seconds; ', CHAR(13), CHAR(10),
+             'total read IO time: ', FORMAT(i.total_read_time_ms, '#,0'), ' milliseconds; ', CHAR(13), CHAR(10),
+             'total throttled read IO time: ', FORMAT(i.total_read_throttled_time_ms, '#,0'), ' milliseconds; ', CHAR(13), CHAR(10),
+             'average read IOPS: ', FORMAT(i.avg_read_iops, '#,0'), '; ', CHAR(13), CHAR(10),
+             'maximum read IOPS: ', FORMAT(i.max_read_iops, '#,0'), '; ', CHAR(13), CHAR(10),
+             'average write IOPS: ', FORMAT(i.avg_write_iops, '#,0'), '; ', CHAR(13), CHAR(10),
+             'maximum write IOPS: ', FORMAT(i.max_write_iops, '#,0'), '; ', CHAR(13), CHAR(10),
+             'average read IO throughput: ', FORMAT(i.avg_read_throughput_mbps, '#,0.00'), ' MBps; ', CHAR(13), CHAR(10),
+             'maximum read IO throughput: ', FORMAT(i.max_read_throughput_mbps, '#,0.00'), ' MBps.'
+             )
+       AS details
+FROM packed_io_rg_snapshot_impact_agg AS i
+CROSS JOIN sys.database_service_objectives AS dso
+WHERE i.count_io_rg_impact_intervals > 0
+      AND
+      dso.database_id = DB_ID()
 ;
 
 -- Return detected tips
@@ -642,7 +1157,7 @@ OUTER APPLY (
 WHERE dt.details IS NOT NULL
       OR
       @ReturnAllTips = 1
-ORDER BY tip_id
+ORDER BY confidence_percent DESC
 ;
 
 END TRY
