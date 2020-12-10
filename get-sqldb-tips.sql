@@ -1,10 +1,8 @@
 /*
 Returns a set of tips aiming to improve database design, health, and performance of an Azure SQL DB database or elastic pool.
-For a detailed description, see wiki: https://github.com/microsoft/azure-sql-tools/wiki/Azure-SQL-Database-tips
+For a detailed description and the latest version of the script, see https://aka.ms/sqldbtips
 
-Latest version of the script is here: https://github.com/microsoft/azure-sql-tools/tree/main/sqldb-tips
-
-v20201209.1
+v20201210.1
 */
 
 DECLARE @ReturnAllTips bit = 0; -- Debug flag to return all tips regardless of database state
@@ -52,15 +50,6 @@ SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 BEGIN TRY
 
-IF IS_ROLEMEMBER('public') <> 1
-   OR
-   NOT EXISTS (
-              SELECT 1 
-              FROM sys.fn_my_permissions(NULL, 'DATABASE')
-              WHERE permission_name = 'VIEW DATABASE STATE'
-              )
-    THROW 50001, 'Insufficient permissions.', 1;
-
 -- Bail out if CPU utilization in the last 1 minute is very high to avoid impacting workloads
 IF EXISTS (
           SELECT TOP (4) *
@@ -70,7 +59,7 @@ IF EXISTS (
                 avg_instance_cpu_percent > 95
           ORDER BY end_time DESC
           )
-    THROW 50002, 'CPU utilization is too high. Execute script at a later time.', 1;
+    THROW 50010, 'CPU utilization is too high. Execute script at a later time.', 1;
 
 -- Define all tips
 INSERT INTO @TipDefinition (tip_id, tip_name, confidence_percent, tip_url)
