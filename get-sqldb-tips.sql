@@ -2,7 +2,7 @@
 Returns a set of tips aiming to improve database design, health, and performance of an Azure SQL DB database or elastic pool.
 For a detailed description and the latest version of the script, see https://aka.ms/sqldbtips
 
-v20201211.1
+v20201213.1
 */
 
 DECLARE @ReturnAllTips bit = 0; -- Debug flag to return all tips regardless of database state
@@ -40,24 +40,32 @@ DECLARE @HighLogRateThresholdPercent decimal(5,2) = 80, -- Minimum log rate as p
         @GroupIORGAtLimitThresholdRatio decimal(3,2) = 0.9, -- The minimum ratio of governed IOPS issued to workload group IOPS limit that is considered significant in the "IOPS at SLO workload group limit" tip
         @GroupIORGImpactRatio decimal(3,2) = 0.8, -- The minimum ratio of IO RG delay time to total IO stall time that is considered significant in the "Significant workload group IO RG impact" tip
         @PoolIORGAtLimitThresholdRatio decimal(3,2) = 0.9, -- The minimum ratio of governed IOPS issued to resource pool IOPS limit that is considered significant in the "IOPS at SLO resource pool limit" tip
-        @PoolIORGImpactRatio decimal(3,2) = 0.8 -- The minimum ratio of IO RG delay time to total IO stall time that is considered significant in the "Significant resource pool IO RG impact" tip
+        @PoolIORGImpactRatio decimal(3,2) = 0.8, -- The minimum ratio of IO RG delay time to total IO stall time that is considered significant in the "Significant resource pool IO RG impact" tip
+        @PVSMinimumSizeThresholdGB int = 100, -- The minimum size of persistent version store (PVS) to be considered significant in the "PVS is large" tip
+        @PVSToMaxSizeMinThresholdRatio decimal(3,2) = 0.3 -- The minimum ratio of PVS size to database maxsize to be considered significant in the "PVS is large" tip
 ;
 
 SET NOCOUNT ON;
-
--- Avoid blocking user DDL due to shared locks reading metadata
-SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+SET LOCK_TIMEOUT 5000; -- abort if a concurrent DDL operation holds a lock on metadata
 
 BEGIN TRY
 
--- Bail out if CPU utilization in the last 1 minute is very high to avoid impacting workloads
+-- Bail out if recent CPU utilization is very high, to avoid impacting workloads
 IF EXISTS (
-          SELECT TOP (4) *
-          FROM sys.dm_db_resource_stats
-          WHERE avg_cpu_percent > 95
+          SELECT 1
+          FROM (
+               SELECT avg_cpu_percent,
+                      avg_instance_cpu_percent,
+                      LEAD(end_time) OVER (ORDER BY end_time) AS next_end_time
+               FROM sys.dm_db_resource_stats
+               ) AS rs
+          WHERE next_end_time IS NULL
+                AND
+                (
+                rs.avg_cpu_percent > 95
                 OR
-                avg_instance_cpu_percent > 95
-          ORDER BY end_time DESC
+                rs.avg_instance_cpu_percent > 95
+                )
           )
     THROW 50010, 'CPU utilization is too high. Execute script at a later time.', 1;
 
@@ -92,7 +100,9 @@ VALUES
 (1230, 'Data IOPS are close to workload group limit',        70, 'https://aka.ms/sqldbtips#1230'),
 (1240, 'Workload group IO governance impact is significant', 40, 'https://aka.ms/sqldbtips#1240'),
 (1250, 'Data IOPS are close to resource pool limit',         70, 'https://aka.ms/sqldbtips#1250'),
-(1260, 'Resouce pool IO governance impact is significant',   40, 'https://aka.ms/sqldbtips#1260')
+(1260, 'Resouce pool IO governance impact is significant',   40, 'https://aka.ms/sqldbtips#1260'),
+(1270, 'Persistent Version Store (PVS) size is large',       70, 'https://aka.ms/sqldbtips#1270'),
+(1280, 'Paused resumable index operations found',            90, 'https://aka.ms/sqldbtips#1280')
 ;
 
 -- MAXDOP
@@ -658,7 +668,7 @@ WHERE cp.objtype IN ('Adhoc','Prepared')
       AND
       cp.cacheobjtype = 'Compiled Plan'
       AND
-      t.dbid BETWEEN 5 AND 30000 -- Exclude system databases
+      t.dbid BETWEEN 5 AND 30000 -- exclude system databases
 GROUP BY t.dbid
 )
 INSERT INTO @DetectedTip (tip_id, details)
@@ -1128,6 +1138,104 @@ WHERE i.count_io_rg_impact_intervals > 0
       dso.database_id = DB_ID()
 ;
 
+-- Large PVS
+WITH pvs_db_stats AS
+(
+SELECT DB_NAME(pvss.database_id) AS database_name,
+       pvss.persistent_version_store_size_kb / 1024. / 1024 AS persistent_version_store_size_gb,
+       pvss.online_index_version_store_size_kb / 1024. / 1024 AS online_index_version_store_size_gb,
+       pvss.current_aborted_transaction_count,
+       pvss.aborted_version_cleaner_start_time,
+       pvss.aborted_version_cleaner_end_time,
+       dt.database_transaction_begin_time AS oldest_transaction_begin_time,
+       asdt.session_id AS active_transaction_session_id,
+       asdt.elapsed_time_seconds AS active_transaction_elapsed_time_seconds
+FROM sys.dm_tran_persistent_version_store_stats AS pvss
+LEFT JOIN sys.dm_tran_database_transactions AS dt
+ON pvss.oldest_active_transaction_id = dt.transaction_id
+   AND
+   pvss.database_id = dt.database_id
+LEFT JOIN sys.dm_tran_active_snapshot_database_transactions AS asdt
+ON pvss.min_transaction_timestamp = asdt.transaction_sequence_num
+   OR
+   pvss.online_index_min_transaction_timestamp = asdt.transaction_sequence_num
+WHERE pvss.database_id = DB_ID()
+      AND
+      (
+      persistent_version_store_size_kb > @PVSMinimumSizeThresholdGB * 1024 * 1024 -- PVS is larger than n GB
+      OR
+      persistent_version_store_size_kb > @PVSToMaxSizeMinThresholdRatio * CAST(DATABASEPROPERTYEX(DB_NAME(), 'MaxSizeInBytes') AS bigint) / 1024. -- PVS is larger than n% of database maxsize
+      )
+)
+INSERT INTO @DetectedTip (tip_id, details)
+SELECT 1270 AS tip_id,
+       STRING_AGG(
+                 CAST(CONCAT(
+                            'Database name: ',  QUOTENAME(database_name), CHAR(13), CHAR(10),
+                            'PVS size (GB): ', FORMAT(persistent_version_store_size_gb, 'N'), CHAR(13), CHAR(10),
+                            'online index version store size (GB): ', FORMAT(online_index_version_store_size_gb, 'N'), CHAR(13), CHAR(10),
+                            'current aborted transaction count: ', FORMAT(current_aborted_transaction_count, '#,0'), CHAR(13), CHAR(10),
+                            'aborted transaction version cleaner start time: ', ISNULL(CONVERT(varchar(20), aborted_version_cleaner_start_time, 120), 'N/A'), CHAR(13), CHAR(10),
+                            'aborted transaction version cleaner end time: ', ISNULL(CONVERT(varchar(20), aborted_version_cleaner_end_time, 120), 'N/A'), CHAR(13), CHAR(10),
+                            'oldest transaction begin time: ',  ISNULL(CONVERT(varchar(30), oldest_transaction_begin_time, 121), 'N/A'), CHAR(13), CHAR(10),
+                            'active transaction session_id: ', ISNULL(CAST(active_transaction_session_id AS varchar(11)), 'N/A'), CHAR(13), CHAR(10),
+                            'active transaction elapsed time (seconds): ', ISNULL(CAST(active_transaction_elapsed_time_seconds AS varchar(11)), 'N/A')
+                            ) AS nvarchar(max)),
+                 CONCAT(CHAR(13), CHAR(10))
+                 )
+                 WITHIN GROUP (ORDER BY database_name)
+       AS details
+FROM pvs_db_stats
+HAVING COUNT(1) > 0
+;
+
+-- Paused resumable index DDL
+WITH resumable_index_op AS
+(
+SELECT OBJECT_SCHEMA_NAME(iro.object_id) AS schema_name,
+       OBJECT_NAME(iro.object_id) AS object_name,
+       iro.name AS index_name,
+       i.type_desc AS index_type,
+       iro.percent_complete,
+       iro.start_time,
+       iro.last_pause_time,
+       iro.total_execution_time AS total_execution_time_minutes,
+       iro.page_count * 8 / 1024. AS index_operation_allocated_space_mb,
+       IIF(CAST(dsc.value AS int) = 0, NULL, DATEDIFF(minute, CURRENT_TIMESTAMP, DATEADD(minute, CAST(dsc.value AS int), iro.last_pause_time))) AS time_to_auto_abort_minutes,
+       iro.sql_text
+FROM sys.index_resumable_operations AS iro
+LEFT JOIN sys.indexes AS i -- new index being created will not be present, thus using outer join
+ON iro.object_id = i.object_id
+   AND
+   iro.index_id = i.index_id
+CROSS JOIN sys.database_scoped_configurations AS dsc
+WHERE iro.state_desc = 'PAUSED'
+      AND
+      dsc.name = 'PAUSED_RESUMABLE_INDEX_ABORT_DURATION_MINUTES'
+)
+INSERT INTO @DetectedTip (tip_id, details)
+SELECT 1280 AS tip_id,
+       STRING_AGG(
+                 CAST(CONCAT(
+                            'schema name: ', QUOTENAME(schema_name) COLLATE DATABASE_DEFAULT, CHAR(13), CHAR(10),
+                            'object name: ', QUOTENAME(object_name) COLLATE DATABASE_DEFAULT, CHAR(13), CHAR(10),
+                            'index name: ', QUOTENAME(index_name) COLLATE DATABASE_DEFAULT, CHAR(13), CHAR(10),
+                            'index type: ' + index_type COLLATE DATABASE_DEFAULT + CHAR(13) + CHAR(10),
+                            'percent complete: ', FORMAT(percent_complete, '#,0.00'), '%', CHAR(13), CHAR(10),
+                            'start time: ', CONVERT(varchar(20), start_time, 120), CHAR(13), CHAR(10),
+                            'last pause time: ', CONVERT(varchar(20), last_pause_time, 120), CHAR(13), CHAR(10),
+                            'total execution time (minutes): ', FORMAT(total_execution_time_minutes, '#,0'), CHAR(13), CHAR(10),
+                            'space allocated by resumable index operation (MB): ', FORMAT(index_operation_allocated_space_mb, '#,0.00'), CHAR(13), CHAR(10),
+                            'time remaining to auto-abort (minutes): ' + FORMAT(time_to_auto_abort_minutes, '#,0') + CHAR(13) + CHAR(10),
+                            'index operation SQL statement: ', sql_text COLLATE DATABASE_DEFAULT, CHAR(13), CHAR(10)
+                            ) AS nvarchar(max)),
+                 CONCAT(CHAR(13), CHAR(10))
+                 )
+                 WITHIN GROUP (ORDER BY schema_name, object_name, index_name)
+FROM resumable_index_op 
+HAVING COUNT(1) > 0
+;
+
 -- Return detected tips
 SELECT td.tip_id,
        td.tip_name,
@@ -1151,5 +1259,7 @@ ORDER BY confidence_percent DESC
 
 END TRY
 BEGIN CATCH
+    SET LOCK_TIMEOUT -1; -- revert to default
+
     THROW;
 END CATCH;
