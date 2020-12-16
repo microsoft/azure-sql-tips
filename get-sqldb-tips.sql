@@ -2,7 +2,7 @@
 Returns a set of tips aiming to improve database design, health, and performance of an Azure SQL DB database or elastic pool.
 For a detailed description and the latest version of the script, see https://aka.ms/sqldbtips
 
-v20201213.1
+v20201215.1
 */
 
 DECLARE @ReturnAllTips bit = 0; -- Debug flag to return all tips regardless of database state
@@ -42,7 +42,8 @@ DECLARE @HighLogRateThresholdPercent decimal(5,2) = 80, -- Minimum log rate as p
         @PoolIORGAtLimitThresholdRatio decimal(3,2) = 0.9, -- The minimum ratio of governed IOPS issued to resource pool IOPS limit that is considered significant in the "IOPS at SLO resource pool limit" tip
         @PoolIORGImpactRatio decimal(3,2) = 0.8, -- The minimum ratio of IO RG delay time to total IO stall time that is considered significant in the "Significant resource pool IO RG impact" tip
         @PVSMinimumSizeThresholdGB int = 100, -- The minimum size of persistent version store (PVS) to be considered significant in the "PVS is large" tip
-        @PVSToMaxSizeMinThresholdRatio decimal(3,2) = 0.3 -- The minimum ratio of PVS size to database maxsize to be considered significant in the "PVS is large" tip
+        @PVSToMaxSizeMinThresholdRatio decimal(3,2) = 0.3, -- The minimum ratio of PVS size to database maxsize to be considered significant in the "PVS is large" tip
+        @CCICandidateMinSizeGB int = 10 -- The minimum table size to be considered in the "CCI candidates" tip
 ;
 
 SET NOCOUNT ON;
@@ -62,7 +63,7 @@ IF EXISTS (
           WHERE next_end_time IS NULL
                 AND
                 (
-                rs.avg_cpu_percent > 95
+                rs.avg_cpu_percent > 98
                 OR
                 rs.avg_instance_cpu_percent > 95
                 )
@@ -102,7 +103,8 @@ VALUES
 (1250, 'Data IOPS are close to resource pool limit',         70, 'https://aka.ms/sqldbtips#1250'),
 (1260, 'Resouce pool IO governance impact is significant',   40, 'https://aka.ms/sqldbtips#1260'),
 (1270, 'Persistent Version Store (PVS) size is large',       70, 'https://aka.ms/sqldbtips#1270'),
-(1280, 'Paused resumable index operations found',            90, 'https://aka.ms/sqldbtips#1280')
+(1280, 'Paused resumable index operations found',            90, 'https://aka.ms/sqldbtips#1280'),
+(1290, 'Clustered columnstore conversion candidates found',  50, 'https://aka.ms/sqldbtips#1290')
 ;
 
 -- MAXDOP
@@ -447,7 +449,7 @@ WHERE ius.database_id = DB_ID()
 )
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1170 AS tip_id,
-       CONCAT('For time period starting from ', CONVERT(varchar(20), si.sqlserver_start_time, 120), ':', CHAR(13), CHAR(10), iu.details) AS details
+       CONCAT('Since database engine startup at ', CONVERT(varchar(20), si.sqlserver_start_time, 120), ':', CHAR(13), CHAR(10), iu.details) AS details
 FROM index_usage AS iu
 CROSS JOIN sys.dm_os_sys_info AS si
 WHERE iu.details IS NOT NULL
@@ -599,7 +601,7 @@ HAVING COUNT(1) > 0
 )
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1180 AS tip_id,
-       CONCAT('For time period starting from ', CONVERT(varchar(20), si.sqlserver_start_time, 120), ':', CHAR(13), CHAR(10), ppga.details) AS details
+       CONCAT('Since database engine startup at ', CONVERT(varchar(20), si.sqlserver_start_time, 120), ':', CHAR(13), CHAR(10), ppga.details) AS details
 FROM packed_partition_group_agg AS ppga
 CROSS JOIN sys.dm_os_sys_info AS si
 WHERE ppga.details IS NOT NULL
@@ -721,7 +723,7 @@ HAVING COUNT(1) > 0
 )
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1210 AS tip_id,
-       CONCAT('For time period starting from ', CONVERT(varchar(20), si.sqlserver_start_time, 120), ':', CHAR(13), CHAR(10), mia.details) AS details
+       CONCAT('Since database engine startup at ', CONVERT(varchar(20), si.sqlserver_start_time, 120), ':', CHAR(13), CHAR(10), mia.details) AS details
 FROM missing_index_agg AS mia
 CROSS JOIN sys.dm_os_sys_info AS si
 WHERE mia.details IS NOT NULL
@@ -1234,6 +1236,141 @@ SELECT 1280 AS tip_id,
                  WITHIN GROUP (ORDER BY schema_name, object_name, index_name)
 FROM resumable_index_op 
 HAVING COUNT(1) > 0
+;
+
+-- CCI candidates
+WITH
+candidate_partition AS
+(
+SELECT p.object_id,
+       p.index_id,
+       p.partition_number,
+       p.rows,
+       SUM(au.used_pages) * 8 / 1024. AS partition_size_mb
+FROM sys.partitions AS p
+INNER JOIN sys.allocation_units AS au
+ON (
+   (p.hobt_id = au.container_id AND au.type_desc IN ('IN_ROW_DATA','ROW_OVERFLOW_DATA'))
+   OR
+   (p.partition_id = au.container_id AND au.type_desc = 'LOB_DATA')
+   )
+WHERE p.data_compression_desc IN ('NONE','ROW','PAGE')
+      AND
+      -- exclude all partitions of tables with NCCI, and all NCI partitions of tables with CCI
+      NOT EXISTS (
+                 SELECT 1
+                 FROM sys.partitions AS pncci
+                 WHERE pncci.object_id = p.object_id
+                       AND
+                       pncci.index_id NOT IN (0,1)
+                       AND
+                       pncci.data_compression_desc IN ('COLUMNSTORE','COLUMNSTORE_ARCHIVE')
+                 UNION
+                 SELECT 1
+                 FROM sys.partitions AS pnci
+                 WHERE pnci.object_id = p.object_id
+                       AND
+                       pnci.index_id = 1
+                       AND
+                       pnci.data_compression_desc IN ('COLUMNSTORE','COLUMNSTORE_ARCHIVE')
+                 )
+GROUP BY p.object_id,
+         p.index_id,
+         p.partition_number,
+         p.rows
+),
+table_operational_stats AS -- summarize operational stats for heap, CI, and NCI
+(
+SELECT cp.object_id,
+       SUM(IIF(cp.index_id IN (0,1), partition_size_mb, 0)) AS table_size_mb, -- exclude NCI size
+       SUM(IIF(cp.index_id IN (0,1), 1, 0)) AS partition_count,
+       SUM(ios.leaf_insert_count) AS lead_insert_count,
+       SUM(ios.leaf_update_count) AS leaf_update_count,
+       SUM(ios.leaf_delete_count + ios.leaf_ghost_count) AS leaf_delete_count,
+       SUM(ios.range_scan_count) AS range_scan_count,
+       SUM(ios.singleton_lookup_count) AS singleton_lookup_count
+FROM candidate_partition AS cp
+CROSS APPLY sys.dm_db_index_operational_stats(DB_ID(), cp.object_id, cp.index_id, cp.partition_number) AS ios -- assumption: a representative workload has populated index operational stats for relevant tables
+GROUP BY cp.object_id
+),
+cci_candidate_table AS
+(
+SELECT QUOTENAME(OBJECT_SCHEMA_NAME(t.object_id)) AS schema_name,
+       QUOTENAME(t.name) AS table_name,
+       tos.table_size_mb,
+       tos.partition_count,
+       tos.lead_insert_count AS insert_count,
+       tos.leaf_update_count AS update_count,
+       tos.leaf_delete_count AS delete_count,
+       tos.singleton_lookup_count AS singleton_lookup_count,
+       tos.range_scan_count AS range_scan_count,
+       ius.user_seeks AS seek_count,
+       ius.user_scans AS full_scan_count,
+       ius.user_lookups AS lookup_count
+FROM sys.tables AS t
+INNER JOIN sys.indexes AS i
+ON t.object_id = i.object_id
+INNER JOIN table_operational_stats AS tos
+ON t.object_id = tos.object_id
+INNER JOIN sys.dm_db_index_usage_stats AS ius
+ON t.object_id = ius.object_id
+   AND
+   i.index_id = ius.index_id
+WHERE i.type IN (0,1) -- clustered index or heap
+      AND
+      tos.table_size_mb > @CCICandidateMinSizeGB / 1024. -- consider sufficiently large tables only
+      AND
+      t.is_ms_shipped = 0
+      AND
+      -- at least one partition is columnstore compressible
+      EXISTS (
+             SELECT 1
+             FROM candidate_partition AS cp
+             WHERE cp.object_id = t.object_id
+                   AND
+                   cp.rows >= 102400
+             )
+      AND
+      -- conservatively require a CCI candidate to have no updates, seeks, or lookups
+      tos.leaf_update_count = 0
+      AND
+      tos.singleton_lookup_count = 0
+      AND
+      ius.user_lookups = 0
+      AND
+      ius.user_seeks = 0
+      AND
+      ius.user_scans > 0 -- require a CCI candidate to have some full scans
+),
+cci_candidate_details AS
+(
+SELECT STRING_AGG(
+                 CAST(CONCAT(
+                            'schema: ', schema_name, ', ',
+                            'table: ', table_name, ', ',
+                            'table size (MB): ', FORMAT(table_size_mb, '#,0.00'), ', ',
+                            'partition count: ', FORMAT(partition_count, '#,0'), ', ',
+                            'inserts: ', FORMAT(insert_count, '#,0'), ', ',
+                            'updates: ', FORMAT(update_count, '#,0'), ', ',
+                            'deletes: ', FORMAT(delete_count, '#,0'), ', ',
+                            'singleton lookups: ', FORMAT(singleton_lookup_count, '#,0'), ', ',
+                            'range scans: ', FORMAT(range_scan_count, '#,0'), ', ',
+                            'seeks: ', FORMAT(seek_count, '#,0'), ', ',
+                            'full scans: ', FORMAT(full_scan_count, '#,0'), ', ',
+                            'lookups: ', FORMAT(lookup_count, '#,0')
+                            ) AS nvarchar(max)),
+                 CONCAT(CHAR(13), CHAR(10))
+                 )
+                 WITHIN GROUP (ORDER BY schema_name, table_name)
+       AS details
+FROM cci_candidate_table
+)
+INSERT INTO @DetectedTip (tip_id, details)
+SELECT 1290 AS tip_id,
+       CONCAT('Since database engine startup at ', CONVERT(varchar(20), si.sqlserver_start_time, 120), ':', CHAR(13), CHAR(10), ccd.details) AS details
+FROM cci_candidate_details AS ccd
+CROSS JOIN sys.dm_os_sys_info AS si
+WHERE ccd.details IS NOT NULL
 ;
 
 -- Return detected tips
