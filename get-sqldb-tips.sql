@@ -2,7 +2,7 @@
 Returns a set of tips aiming to improve database design, health, and performance of an Azure SQL DB database or elastic pool.
 For a detailed description and the latest version of the script, see https://aka.ms/sqldbtips
 
-v20201215.1
+v20201216.1
 */
 
 DECLARE @ReturnAllTips bit = 0; -- Debug flag to return all tips regardless of database state
@@ -43,7 +43,9 @@ DECLARE @HighLogRateThresholdPercent decimal(5,2) = 80, -- Minimum log rate as p
         @PoolIORGImpactRatio decimal(3,2) = 0.8, -- The minimum ratio of IO RG delay time to total IO stall time that is considered significant in the "Significant resource pool IO RG impact" tip
         @PVSMinimumSizeThresholdGB int = 100, -- The minimum size of persistent version store (PVS) to be considered significant in the "PVS is large" tip
         @PVSToMaxSizeMinThresholdRatio decimal(3,2) = 0.3, -- The minimum ratio of PVS size to database maxsize to be considered significant in the "PVS is large" tip
-        @CCICandidateMinSizeGB int = 10 -- The minimum table size to be considered in the "CCI candidates" tip
+        @CCICandidateMinSizeGB int = 10, -- The minimum table size to be considered in the "CCI candidates" tip
+        @HighGeoReplLagMinThresholdSeconds int = 10, -- The minimum geo-replication lag to be considered significant in the "Geo-replication health" tip
+        @RecentGeoReplTranTimeWindowLengthSeconds int = 300 -- The length of time window that defines recent geo-replicated transactions in the "Geo-replication health" tip
 ;
 
 SET NOCOUNT ON;
@@ -104,7 +106,8 @@ VALUES
 (1260, 'Resouce pool IO governance impact is significant',   40, 'https://aka.ms/sqldbtips#1260'),
 (1270, 'Persistent Version Store (PVS) size is large',       70, 'https://aka.ms/sqldbtips#1270'),
 (1280, 'Paused resumable index operations found',            90, 'https://aka.ms/sqldbtips#1280'),
-(1290, 'Clustered columnstore conversion candidates found',  50, 'https://aka.ms/sqldbtips#1290')
+(1290, 'Clustered columnstore candidates found',             50, 'https://aka.ms/sqldbtips#1290'),
+(1300, 'Geo-replication state may be unhealthy',             70, 'https://aka.ms/sqldbtips#1300')
 ;
 
 -- MAXDOP
@@ -790,6 +793,7 @@ WHERE rg.database_id = DB_ID()
 pre_packed_io_rg_snapshot AS
 (
 SELECT SUM(duration_ms) OVER (ORDER BY (SELECT 'no order')) / 60000 AS recent_history_duration_minutes,
+       duration_ms,
        snapshot_time,
        read_iops,
        write_iops,
@@ -819,6 +823,7 @@ packed_io_rg_snapshot_limit AS
 SELECT MIN(recent_history_duration_minutes) AS recent_history_duration_minutes,
        MIN(snapshot_time) AS min_snapshot_time,
        MAX(snapshot_time) AS max_snapshot_time,
+       AVG(duration_ms) AS avg_snapshot_duration_ms,
        SUM(delta_read_stall_queued_ms) AS total_read_throttled_time_ms,
        SUM(delta_read_stall_ms) AS total_read_time_ms,
        AVG(read_iops) AS avg_read_iops,
@@ -844,6 +849,7 @@ packed_io_rg_snapshot_impact AS
 SELECT MIN(recent_history_duration_minutes) AS recent_history_duration_minutes,
        MIN(snapshot_time) AS min_snapshot_time,
        MAX(snapshot_time) AS max_snapshot_time,
+       AVG(duration_ms) AS avg_snapshot_duration_ms,
        SUM(delta_read_stall_queued_ms) AS total_read_throttled_time_ms,
        SUM(delta_read_stall_ms) AS total_read_time_ms,
        AVG(read_iops) AS avg_read_iops,
@@ -867,7 +873,7 @@ GROUP BY impact_grouping_helper
 packed_io_rg_snapshot_limit_agg AS
 (
 SELECT MIN(recent_history_duration_minutes) AS recent_history_duration_minutes,
-       MAX(DATEDIFF(second, min_snapshot_time, max_snapshot_time)) AS longest_io_rg_at_limit_duration_seconds,
+       MAX(DATEDIFF(second, min_snapshot_time, max_snapshot_time) + avg_snapshot_duration_ms / 1000.) AS longest_io_rg_at_limit_duration_seconds,
        COUNT(1) AS count_io_rg_at_limit_intervals,
        SUM(total_read_time_ms) AS total_read_time_ms,
        SUM(total_read_throttled_time_ms) AS total_read_throttled_time_ms,
@@ -888,7 +894,7 @@ FROM packed_io_rg_snapshot_limit
 packed_io_rg_snapshot_impact_agg AS
 (
 SELECT MIN(recent_history_duration_minutes) AS recent_history_duration_minutes,
-       MAX(DATEDIFF(second, min_snapshot_time, max_snapshot_time)) AS longest_io_rg_impact_duration_seconds,
+       MAX(DATEDIFF(second, min_snapshot_time, max_snapshot_time) + avg_snapshot_duration_ms / 1000.) AS longest_io_rg_impact_duration_seconds,
        COUNT(1) AS count_io_rg_impact_intervals,
        SUM(total_read_time_ms) AS total_read_time_ms,
        SUM(total_read_throttled_time_ms) AS total_read_throttled_time_ms,
@@ -997,6 +1003,7 @@ WHERE rg.database_id = DB_ID()
 pre_packed_io_rg_snapshot AS
 (
 SELECT SUM(duration_ms) OVER (ORDER BY (SELECT 'no order')) / 60000 AS recent_history_duration_minutes,
+       duration_ms,
        snapshot_time,
        read_iops,
        write_iops,
@@ -1023,6 +1030,7 @@ packed_io_rg_snapshot_limit AS
 SELECT MIN(recent_history_duration_minutes) AS recent_history_duration_minutes,
        MIN(snapshot_time) AS min_snapshot_time,
        MAX(snapshot_time) AS max_snapshot_time,
+       AVG(duration_ms) AS avg_snapshot_duration_ms,
        SUM(delta_read_io_stall_queued_ms) AS total_read_throttled_time_ms,
        SUM(delta_read_io_stall_ms) AS total_read_time_ms,
        AVG(read_iops) AS avg_read_iops,
@@ -1044,6 +1052,7 @@ packed_io_rg_snapshot_impact AS
 SELECT MIN(recent_history_duration_minutes) AS recent_history_duration_minutes,
        MIN(snapshot_time) AS min_snapshot_time,
        MAX(snapshot_time) AS max_snapshot_time,
+       AVG(duration_ms) AS avg_snapshot_duration_ms,
        SUM(delta_read_io_stall_queued_ms) AS total_read_throttled_time_ms,
        SUM(delta_read_io_stall_ms) AS total_read_time_ms,
        AVG(read_iops) AS avg_read_iops,
@@ -1063,7 +1072,7 @@ GROUP BY impact_grouping_helper
 packed_io_rg_snapshot_limit_agg AS
 (
 SELECT MIN(recent_history_duration_minutes) AS recent_history_duration_minutes,
-       MAX(DATEDIFF(second, min_snapshot_time, max_snapshot_time)) AS longest_io_rg_at_limit_duration_seconds,
+       MAX(DATEDIFF(second, min_snapshot_time, max_snapshot_time) + avg_snapshot_duration_ms / 1000.) AS longest_io_rg_at_limit_duration_seconds,
        COUNT(1) AS count_io_rg_at_limit_intervals,
        SUM(total_read_time_ms) AS total_read_time_ms,
        SUM(total_read_throttled_time_ms) AS total_read_throttled_time_ms,
@@ -1080,7 +1089,7 @@ FROM packed_io_rg_snapshot_limit
 packed_io_rg_snapshot_impact_agg AS
 (
 SELECT MIN(recent_history_duration_minutes) AS recent_history_duration_minutes,
-       MAX(DATEDIFF(second, min_snapshot_time, max_snapshot_time)) AS longest_io_rg_impact_duration_seconds,
+       MAX(DATEDIFF(second, min_snapshot_time, max_snapshot_time) + avg_snapshot_duration_ms / 1000.) AS longest_io_rg_impact_duration_seconds,
        COUNT(1) AS count_io_rg_impact_intervals,
        SUM(total_read_time_ms) AS total_read_time_ms,
        SUM(total_read_throttled_time_ms) AS total_read_throttled_time_ms,
@@ -1371,6 +1380,45 @@ SELECT 1290 AS tip_id,
 FROM cci_candidate_details AS ccd
 CROSS JOIN sys.dm_os_sys_info AS si
 WHERE ccd.details IS NOT NULL
+;
+
+-- Geo-replication health
+WITH 
+geo_replication_link_details AS
+(
+SELECT STRING_AGG(
+                 CAST(CONCAT(
+                            'link GUID: ', link_guid, ', ',
+                            'local server: ' + QUOTENAME(@@SERVERNAME) + ', ',
+                            'local database: ' + QUOTENAME(DB_NAME()) + ', ',
+                            'partner server: ' + QUOTENAME(partner_server) + ', ',
+                            'partner database: ' + QUOTENAME(partner_database) + ', ',
+                            'geo-replication role: ' + role_desc + ', ',
+                            'last replication time: ' + CAST(last_replication AS varchar(40)) + ', ',
+                            'geo-replication lag (seconds): ' + FORMAT(replication_lag_sec, '#,0') + ', ',
+                            'geo-replication state: ' + replication_state_desc
+                            ) AS nvarchar(max)),
+                 CONCAT(CHAR(13), CHAR(10))
+                 )
+                 WITHIN GROUP (ORDER BY partner_server, partner_database)
+       AS details
+FROM sys.dm_geo_replication_link_status
+WHERE (replication_state_desc <> 'CATCH_UP' OR replication_state_desc IS NULL)
+      OR
+      -- high replication lag for recent transactions
+      (
+      replication_state_desc = 'CATCH_UP'
+      AND
+      replication_lag_sec > @HighGeoReplLagMinThresholdSeconds
+      AND
+      last_replication > DATEADD(second, -@RecentGeoReplTranTimeWindowLengthSeconds, SYSDATETIMEOFFSET())
+      )
+HAVING COUNT(1) > 0
+)
+INSERT INTO @DetectedTip (tip_id, details)
+SELECT 1300 AS tip_id,
+       details
+FROM geo_replication_link_details
 ;
 
 -- Return detected tips
