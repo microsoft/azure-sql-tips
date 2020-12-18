@@ -2,7 +2,7 @@
 Returns a set of tips aiming to improve database design, health, and performance of an Azure SQL DB database or elastic pool.
 For a detailed description and the latest version of the script, see https://aka.ms/sqldbtips
 
-v20201216.1
+v20201217.1
 */
 
 DECLARE @ReturnAllTips bit = 0; -- Debug flag to return all tips regardless of database state
@@ -99,12 +99,12 @@ VALUES
 (1190, 'Log rate is close to limit',                         70, 'https://aka.ms/sqldbtips#1190'),
 (1200, 'Plan cache is bloated by single-use plans',          90, 'https://aka.ms/sqldbtips#1200'),
 (1210, 'Missing indexes',                                    70, 'https://aka.ms/sqldbtips#1210'),
-(1220, 'Large redo queue',                                   60, 'https://aka.ms/sqldbtips#1220'),
+(1220, 'Redo queue is large',                                60, 'https://aka.ms/sqldbtips#1220'),
 (1230, 'Data IOPS are close to workload group limit',        70, 'https://aka.ms/sqldbtips#1230'),
 (1240, 'Workload group IO governance impact is significant', 40, 'https://aka.ms/sqldbtips#1240'),
 (1250, 'Data IOPS are close to resource pool limit',         70, 'https://aka.ms/sqldbtips#1250'),
 (1260, 'Resouce pool IO governance impact is significant',   40, 'https://aka.ms/sqldbtips#1260'),
-(1270, 'Persistent Version Store (PVS) size is large',       70, 'https://aka.ms/sqldbtips#1270'),
+(1270, 'Persistent Version Store size is large',             70, 'https://aka.ms/sqldbtips#1270'),
 (1280, 'Paused resumable index operations found',            90, 'https://aka.ms/sqldbtips#1280'),
 (1290, 'Clustered columnstore candidates found',             50, 'https://aka.ms/sqldbtips#1290'),
 (1300, 'Geo-replication state may be unhealthy',             70, 'https://aka.ms/sqldbtips#1300')
@@ -452,7 +452,7 @@ WHERE ius.database_id = DB_ID()
 )
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1170 AS tip_id,
-       CONCAT('Since database engine startup at ', CONVERT(varchar(20), si.sqlserver_start_time, 120), ':', CHAR(13), CHAR(10), iu.details) AS details
+       CONCAT('Since database engine startup at ', CONVERT(varchar(20), si.sqlserver_start_time, 120), ' UTC:', CHAR(13), CHAR(10), iu.details) AS details
 FROM index_usage AS iu
 CROSS JOIN sys.dm_os_sys_info AS si
 WHERE iu.details IS NOT NULL
@@ -490,6 +490,7 @@ partition_stats AS
 (
 SELECT o.object_id,
        i.name AS index_name,
+       i.type_desc AS index_type,
        p.partition_number,
        p.partition_size_mb,
        ios.leaf_update_count * 1. / NULLIF((ios.range_scan_count + ios.leaf_insert_count + ios.leaf_delete_count + ios.leaf_update_count + ios.leaf_page_merge_count + ios.singleton_lookup_count), 0) AS update_ratio,
@@ -524,6 +525,7 @@ partition_compression AS
 (
 SELECT ps.object_id,
        ps.index_name,
+       ps.index_type,
        ps.partition_number,
        ps.partition_size_mb,
        CASE WHEN -- do not choose page compression when no index stats are available and update_ratio and scan_ratio are NULL, due to low confidence
@@ -560,6 +562,7 @@ AS
 (
 SELECT object_id,
        index_name,
+       index_type,
        new_compression_type,
        partition_number,
        partition_size_mb,
@@ -569,17 +572,20 @@ SELECT object_id,
                                             ) 
        AS interval_group -- used to pack contiguous partition intervals for the same object, index, compression type
 FROM partition_compression
+WHERE new_compression_type IS NOT NULL
 ),
 packed_partition_group AS
 (
 SELECT object_id,
        index_name,
+       index_type,
        new_compression_type,
        SUM(partition_size_mb) AS partition_range_size_mb,
        CONCAT(MIN(partition_number), '-', MAX(partition_number)) AS partition_range
 FROM partition_compression_interval
 GROUP BY object_id,
          index_name,
+         index_type,
          new_compression_type,
          interval_group
 HAVING COUNT(1) > 0
@@ -588,9 +594,10 @@ packed_partition_group_agg AS
 (
 SELECT STRING_AGG(
                  CAST(CONCAT(
-                            'schema: ', QUOTENAME(OBJECT_SCHEMA_NAME(object_id)), 
-                            ', object: ', QUOTENAME(OBJECT_NAME(object_id)), 
-                            ', index: ', ISNULL(QUOTENAME(index_name), '<Heap>'), 
+                            'schema: ', QUOTENAME(OBJECT_SCHEMA_NAME(object_id)) COLLATE DATABASE_DEFAULT,
+                            ', object: ', QUOTENAME(OBJECT_NAME(object_id)) COLLATE DATABASE_DEFAULT, 
+                            ', index: ' +  QUOTENAME(index_name) COLLATE DATABASE_DEFAULT, 
+                            ', index type: ', index_type COLLATE DATABASE_DEFAULT,
                             ', partition range: ', partition_range, 
                             ', partition range size (MB): ', FORMAT(partition_range_size_mb, 'N'), 
                             ', new compression type: ', new_compression_type
@@ -604,7 +611,7 @@ HAVING COUNT(1) > 0
 )
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1180 AS tip_id,
-       CONCAT('Since database engine startup at ', CONVERT(varchar(20), si.sqlserver_start_time, 120), ':', CHAR(13), CHAR(10), ppga.details) AS details
+       CONCAT('Since database engine startup at ', CONVERT(varchar(20), si.sqlserver_start_time, 120), ' UTC:', CHAR(13), CHAR(10), ppga.details) AS details
 FROM packed_partition_group_agg AS ppga
 CROSS JOIN sys.dm_os_sys_info AS si
 WHERE ppga.details IS NOT NULL
@@ -726,7 +733,7 @@ HAVING COUNT(1) > 0
 )
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1210 AS tip_id,
-       CONCAT('Since database engine startup at ', CONVERT(varchar(20), si.sqlserver_start_time, 120), ':', CHAR(13), CHAR(10), mia.details) AS details
+       CONCAT('Since database engine startup at ', CONVERT(varchar(20), si.sqlserver_start_time, 120), ' UTC:', CHAR(13), CHAR(10), mia.details) AS details
 FROM missing_index_agg AS mia
 CROSS JOIN sys.dm_os_sys_info AS si
 WHERE mia.details IS NOT NULL
@@ -773,7 +780,7 @@ SELECT wgh.snapshot_time,
           +
           IIF(rg.govern_background_io = 0, wgh.delta_background_writes, 0) -- depending on SLO, background write IO may or may not be accounted toward workload group IOPS limit
           >
-          rg.primary_group_max_io * wgh.duration_ms / 1000 * @GroupIORGAtLimitThresholdRatio, -- over n% of IOPS budget for this interval 
+          CAST(rg.primary_group_max_io AS bigint) * wgh.duration_ms / 1000 * @GroupIORGAtLimitThresholdRatio, -- over n% of IOPS budget for this interval 
           1,
           0
           ) AS reached_iops_limit_indicator,
@@ -939,7 +946,7 @@ SELECT 1240 AS tip_id,
        CONCAT(
              'In the last ', recent_history_duration_minutes,
              ' minutes, there were ', count_io_rg_impact_intervals, 
-             ' time interval(s) when workload group (database-level) resource governance for the service objective was significantly delaying IO.', CHAR(13), CHAR(10),
+             ' time interval(s) when workload group (database-level) resource governance for the selected service objective was significantly delaying IO.', CHAR(13), CHAR(10),
              'Across these intervals, aggregate IO statistics were: ', CHAR(13), CHAR(10),
              'longest interval duration: ', FORMAT(longest_io_rg_impact_duration_seconds, '#,0'), ' seconds; ', CHAR(13), CHAR(10),
              'total read IO time: ', FORMAT(total_read_time_ms, '#,0'), ' milliseconds; ', CHAR(13), CHAR(10),
@@ -976,7 +983,7 @@ SELECT rph.snapshot_time,
        IIF(
           rph.delta_read_io_issued
           >
-          rg.pool_max_io * rph.duration_ms / 1000 * @PoolIORGAtLimitThresholdRatio, -- over n% of IOPS budget for this interval 
+          CAST(rg.pool_max_io AS bigint) * rph.duration_ms / 1000 * @PoolIORGAtLimitThresholdRatio, -- over n% of IOPS budget for this interval 
           1,
           0
           ) AS reached_iops_limit_indicator,
@@ -1129,7 +1136,7 @@ SELECT 1260 AS tip_id,
        CONCAT(
              'In the last ', i.recent_history_duration_minutes,
              ' minutes, there were ', i.count_io_rg_impact_intervals, 
-             ' time interval(s) when resource pool resource governance for the service objective was significantly delaying IO', IIF(dso.service_objective = 'ElasticPool', CONCAT(' for elastic pool ', QUOTENAME(dso.elastic_pool_name)), ''), '.', CHAR(13), CHAR(10),
+             ' time interval(s) when resource pool resource governance for the selected service objective was significantly delaying IO', IIF(dso.service_objective = 'ElasticPool', CONCAT(' for elastic pool ', QUOTENAME(dso.elastic_pool_name)), ''), '.', CHAR(13), CHAR(10),
              'Across these intervals, aggregate IO statistics were: ', CHAR(13), CHAR(10),
              'longest interval duration: ', FORMAT(i.longest_io_rg_impact_duration_seconds, '#,0'), ' seconds; ', CHAR(13), CHAR(10),
              'total read IO time: ', FORMAT(i.total_read_time_ms, '#,0'), ' milliseconds; ', CHAR(13), CHAR(10),
@@ -1150,10 +1157,16 @@ WHERE i.count_io_rg_impact_intervals > 0
 ;
 
 -- Large PVS
-WITH pvs_db_stats AS
+WITH 
+db_allocated_size AS
 (
-SELECT DB_NAME(pvss.database_id) AS database_name,
-       pvss.persistent_version_store_size_kb / 1024. / 1024 AS persistent_version_store_size_gb,
+SELECT SUM(size * 8.) AS db_allocated_size_kb
+FROM sys.database_files
+WHERE type_desc = 'ROWS'
+),
+pvs_db_stats AS
+(
+SELECT pvss.persistent_version_store_size_kb / 1024. / 1024 AS persistent_version_store_size_gb,
        pvss.online_index_version_store_size_kb / 1024. / 1024 AS online_index_version_store_size_gb,
        pvss.current_aborted_transaction_count,
        pvss.aborted_version_cleaner_start_time,
@@ -1162,6 +1175,7 @@ SELECT DB_NAME(pvss.database_id) AS database_name,
        asdt.session_id AS active_transaction_session_id,
        asdt.elapsed_time_seconds AS active_transaction_elapsed_time_seconds
 FROM sys.dm_tran_persistent_version_store_stats AS pvss
+CROSS JOIN db_allocated_size AS das
 LEFT JOIN sys.dm_tran_database_transactions AS dt
 ON pvss.oldest_active_transaction_id = dt.transaction_id
    AND
@@ -1175,29 +1189,23 @@ WHERE pvss.database_id = DB_ID()
       (
       persistent_version_store_size_kb > @PVSMinimumSizeThresholdGB * 1024 * 1024 -- PVS is larger than n GB
       OR
-      persistent_version_store_size_kb > @PVSToMaxSizeMinThresholdRatio * CAST(DATABASEPROPERTYEX(DB_NAME(), 'MaxSizeInBytes') AS bigint) / 1024. -- PVS is larger than n% of database maxsize
+      persistent_version_store_size_kb > @PVSToMaxSizeMinThresholdRatio * das.db_allocated_size_kb -- PVS is larger than n% of database allocated size
       )
 )
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1270 AS tip_id,
-       STRING_AGG(
-                 CAST(CONCAT(
-                            'Database name: ',  QUOTENAME(database_name), CHAR(13), CHAR(10),
-                            'PVS size (GB): ', FORMAT(persistent_version_store_size_gb, 'N'), CHAR(13), CHAR(10),
-                            'online index version store size (GB): ', FORMAT(online_index_version_store_size_gb, 'N'), CHAR(13), CHAR(10),
-                            'current aborted transaction count: ', FORMAT(current_aborted_transaction_count, '#,0'), CHAR(13), CHAR(10),
-                            'aborted transaction version cleaner start time: ', ISNULL(CONVERT(varchar(20), aborted_version_cleaner_start_time, 120), 'N/A'), CHAR(13), CHAR(10),
-                            'aborted transaction version cleaner end time: ', ISNULL(CONVERT(varchar(20), aborted_version_cleaner_end_time, 120), 'N/A'), CHAR(13), CHAR(10),
-                            'oldest transaction begin time: ',  ISNULL(CONVERT(varchar(30), oldest_transaction_begin_time, 121), 'N/A'), CHAR(13), CHAR(10),
-                            'active transaction session_id: ', ISNULL(CAST(active_transaction_session_id AS varchar(11)), 'N/A'), CHAR(13), CHAR(10),
-                            'active transaction elapsed time (seconds): ', ISNULL(CAST(active_transaction_elapsed_time_seconds AS varchar(11)), 'N/A')
-                            ) AS nvarchar(max)),
-                 CONCAT(CHAR(13), CHAR(10))
-                 )
-                 WITHIN GROUP (ORDER BY database_name)
+       CONCAT(
+             'PVS size (GB): ', FORMAT(persistent_version_store_size_gb, 'N'), CHAR(13), CHAR(10),
+             'online index version store size (GB): ', FORMAT(online_index_version_store_size_gb, 'N'), CHAR(13), CHAR(10),
+             'current aborted transaction count: ', FORMAT(current_aborted_transaction_count, '#,0'), CHAR(13), CHAR(10),
+             'aborted transaction version cleaner start time: ', ISNULL(CONVERT(varchar(20), aborted_version_cleaner_start_time, 120), 'N/A'), CHAR(13), CHAR(10),
+             'aborted transaction version cleaner end time: ', ISNULL(CONVERT(varchar(20), aborted_version_cleaner_end_time, 120), 'N/A'), CHAR(13), CHAR(10),
+             'oldest transaction begin time: ',  ISNULL(CONVERT(varchar(30), oldest_transaction_begin_time, 121), 'N/A'), CHAR(13), CHAR(10),
+             'active transaction session_id: ', ISNULL(CAST(active_transaction_session_id AS varchar(11)), 'N/A'), CHAR(13), CHAR(10),
+             'active transaction elapsed time (seconds): ', ISNULL(CAST(active_transaction_elapsed_time_seconds AS varchar(11)), 'N/A')
+             )
        AS details
 FROM pvs_db_stats
-HAVING COUNT(1) > 0
 ;
 
 -- Paused resumable index DDL
@@ -1304,8 +1312,8 @@ GROUP BY cp.object_id
 ),
 cci_candidate_table AS
 (
-SELECT QUOTENAME(OBJECT_SCHEMA_NAME(t.object_id)) AS schema_name,
-       QUOTENAME(t.name) AS table_name,
+SELECT QUOTENAME(OBJECT_SCHEMA_NAME(t.object_id)) COLLATE DATABASE_DEFAULT AS schema_name,
+       QUOTENAME(t.name)  COLLATE DATABASE_DEFAULT AS table_name,
        tos.table_size_mb,
        tos.partition_count,
        tos.lead_insert_count AS insert_count,
@@ -1376,7 +1384,7 @@ FROM cci_candidate_table
 )
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1290 AS tip_id,
-       CONCAT('Since database engine startup at ', CONVERT(varchar(20), si.sqlserver_start_time, 120), ':', CHAR(13), CHAR(10), ccd.details) AS details
+       CONCAT('Since database engine startup at ', CONVERT(varchar(20), si.sqlserver_start_time, 120), ' UTC:', CHAR(13), CHAR(10), ccd.details) AS details
 FROM cci_candidate_details AS ccd
 CROSS JOIN sys.dm_os_sys_info AS si
 WHERE ccd.details IS NOT NULL
