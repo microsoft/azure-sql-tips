@@ -2,7 +2,7 @@
 Returns a set of tips aiming to improve database design, health, and performance of an Azure SQL DB database or elastic pool.
 For a detailed description and the latest version of the script, see https://aka.ms/sqldbtips
 
-v20201217.1
+v20201218.1
 */
 
 DECLARE @ReturnAllTips bit = 0; -- Debug flag to return all tips regardless of database state
@@ -10,7 +10,7 @@ DECLARE @ReturnAllTips bit = 0; -- Debug flag to return all tips regardless of d
 DECLARE @TipDefinition table (
                              tip_id smallint not null primary key,
                              tip_name nvarchar(50) not null unique,
-                             confidence_percent decimal(5,2) not null,
+                             confidence_percent decimal(3,0) not null,
                              tip_url nvarchar(200) not null
                              );
 DECLARE @DetectedTip table (
@@ -45,7 +45,8 @@ DECLARE @HighLogRateThresholdPercent decimal(5,2) = 80, -- Minimum log rate as p
         @PVSToMaxSizeMinThresholdRatio decimal(3,2) = 0.3, -- The minimum ratio of PVS size to database maxsize to be considered significant in the "PVS is large" tip
         @CCICandidateMinSizeGB int = 10, -- The minimum table size to be considered in the "CCI candidates" tip
         @HighGeoReplLagMinThresholdSeconds int = 10, -- The minimum geo-replication lag to be considered significant in the "Geo-replication health" tip
-        @RecentGeoReplTranTimeWindowLengthSeconds int = 300 -- The length of time window that defines recent geo-replicated transactions in the "Geo-replication health" tip
+        @RecentGeoReplTranTimeWindowLengthSeconds int = 300, -- The length of time window that defines recent geo-replicated transactions in the "Geo-replication health" tip
+        @MinEmptyPartitionCount tinyint = 2 -- The number of empty partitions at head end considered required in the "Last partitions are not empty" tip
 ;
 
 SET NOCOUNT ON;
@@ -107,12 +108,18 @@ VALUES
 (1270, 'Persistent Version Store size is large',             70, 'https://aka.ms/sqldbtips#1270'),
 (1280, 'Paused resumable index operations found',            90, 'https://aka.ms/sqldbtips#1280'),
 (1290, 'Clustered columnstore candidates found',             50, 'https://aka.ms/sqldbtips#1290'),
-(1300, 'Geo-replication state may be unhealthy',             70, 'https://aka.ms/sqldbtips#1300')
+(1300, 'Geo-replication state may be unhealthy',             70, 'https://aka.ms/sqldbtips#1300'),
+(1310, 'Last partitions are not empty',                      80, 'https://aka.ms/sqldbtips#1310')
 ;
 
 -- MAXDOP
-INSERT INTO @DetectedTip (tip_id)
-SELECT 1000 AS tip_id
+INSERT INTO @DetectedTip (tip_id, details)
+SELECT 1000 AS tip_id,
+       CONCAT(
+             'MAXDOP for primary: ', CAST(value AS varchar(2)), CHAR(13), CHAR(10),
+             'MAXDOP for secondary: ', ISNULL(CAST(value_for_secondary AS varchar(4)), 'NULL'), CHAR(13), CHAR(10)
+             )
+       AS details
 FROM sys.database_scoped_configurations
 WHERE name = N'MAXDOP'
       AND
@@ -122,7 +129,12 @@ WHERE name = N'MAXDOP'
       AND
       (SELECT COUNT(1) FROM sys.dm_os_schedulers WHERE status = 'VISIBLE ONLINE') > 8
 UNION
-SELECT 1010 AS tip_id
+SELECT 1010 AS tip_id,
+       CONCAT(
+             'MAXDOP for primary: ', CAST(value AS varchar(2)), CHAR(13), CHAR(10),
+             'MAXDOP for secondary: ', ISNULL(CAST(value_for_secondary AS varchar(4)), 'NULL'), CHAR(13), CHAR(10)
+             )
+       AS details
 FROM sys.database_scoped_configurations
 WHERE name = N'MAXDOP'
       AND
@@ -132,7 +144,12 @@ WHERE name = N'MAXDOP'
       AND
       (SELECT COUNT(1) FROM sys.dm_os_schedulers WHERE status = 'VISIBLE ONLINE') > 8
 UNION
-SELECT 1020 AS tip_id
+SELECT 1020 AS tip_id,
+       CONCAT(
+             'MAXDOP for primary: ', CAST(value AS varchar(2)), CHAR(13), CHAR(10),
+             'MAXDOP for secondary: ', ISNULL(CAST(value_for_secondary AS varchar(4)), 'NULL'), CHAR(13), CHAR(10)
+             )
+       AS details
 FROM sys.database_scoped_configurations
 WHERE name = N'MAXDOP'
       AND
@@ -1429,22 +1446,88 @@ SELECT 1300 AS tip_id,
 FROM geo_replication_link_details
 ;
 
+-- Last partitions are not empty
+WITH partition_count AS
+(
+SELECT p.object_id,
+       p.partition_number,
+       p.partition_id,
+       p.hobt_id,
+       p.rows,
+       COUNT(1) OVER (PARTITION BY p.object_id) AS partition_count
+FROM sys.partitions AS p
+WHERE p.index_id IN (0,1)
+),
+alloc_unit AS
+(
+SELECT container_id,
+       type_desc,
+       SUM(used_pages) * 8 / 1024. AS size_mb
+FROM sys.allocation_units
+GROUP BY container_id,
+         type_desc
+),
+object_last_partition AS
+(
+SELECT QUOTENAME(OBJECT_SCHEMA_NAME(pc.object_id)) COLLATE DATABASE_DEFAULT AS schema_name,
+       QUOTENAME(OBJECT_NAME(pc.object_id)) COLLATE DATABASE_DEFAULT AS object_name,
+       pc.partition_count,
+       pc.partition_number,
+       SUM(pc.rows) AS partition_rows,
+       SUM(au.size_mb) AS partition_size_mb
+FROM partition_count AS pc
+INNER JOIN sys.objects AS o
+ON pc.object_id = o.object_id
+INNER JOIN alloc_unit AS au
+ON (
+   (pc.hobt_id = au.container_id AND au.type_desc IN ('IN_ROW_DATA','ROW_OVERFLOW_DATA'))
+   OR
+   (pc.partition_id = au.container_id AND au.type_desc = 'LOB_DATA')
+   )
+WHERE pc.partition_count > 1
+      AND
+      pc.partition_count - pc.partition_number < @MinEmptyPartitionCount -- Consider last n partitions
+      AND
+      o.is_ms_shipped = 0
+GROUP BY pc.object_id,
+         pc.partition_count,
+         pc.partition_number
+HAVING SUM(pc.rows) > 0
+)
+INSERT INTO @DetectedTip (tip_id, details)
+SELECT 1310 AS tip_id,
+       STRING_AGG(
+                 CAST(CONCAT(
+                            'schema: ', schema_name, ', ',
+                            'object: ', object_name, ', ',
+                            'total partitions: ', FORMAT(partition_count, '#,0'), ', ',
+                            'partition number: ', FORMAT(partition_number, '#,0'), ', ',
+                            'partition rows: ', FORMAT(partition_rows, '#,0'), ', ',
+                            'partition size (MB): ', FORMAT(partition_size_mb, '#,0.00'), ', '
+                            ) AS nvarchar(max)), 
+                 CONCAT(CHAR(13), CHAR(10))
+                 )
+                 WITHIN GROUP (ORDER BY schema_name, object_name, partition_number)
+       AS details
+FROM object_last_partition
+HAVING COUNT(1) > 0
+;
+
 -- Return detected tips
 SELECT td.tip_id,
        td.tip_name,
        td.confidence_percent,
        td.tip_url,
-       dt.details
+       d.details
 FROM @TipDefinition AS td
+LEFT JOIN @DetectedTip AS dt
+ON dt.tip_id = td.tip_id
 OUTER APPLY (
             SELECT dt.details AS [processing-instruction(details)]
-            FROM @DetectedTip AS dt
-            WHERE dt.tip_id = td.tip_id
-                  AND
-                  dt.details IS NOT NULL
+            WHERE dt.details IS NOT NULL
             FOR XML PATH (''), TYPE
-            ) dt (details)
-WHERE dt.details IS NOT NULL
+            ) d (details)
+WHERE dt.tip_id IS NOT NULL
       OR
       @ReturnAllTips = 1
 ORDER BY confidence_percent DESC
