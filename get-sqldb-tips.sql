@@ -1,13 +1,16 @@
 /*
-Returns a set of tips aiming to improve database design, health, and performance of an Azure SQL DB database.
+Returns a set of tips to improve database design, health, and performance in Azure SQL Database.
 For a detailed description and the latest version of the script, see https://aka.ms/sqldbtips
 
-v20201219.1
+v20201221.1
 */
 
-DECLARE @ReturnAllTips bit = 0; -- Debug flag to return all tips regardless of database state
+-- Debug flag to return all tips regardless of database state
+DECLARE @ReturnAllTips bit = 0;
 
--- The length of recent time interval to use when determining top queries, in minutes.
+-- Next three variables apply to "Top queries" hint, adjust as needed
+
+-- The length of recent time interval to use when determining top queries
 DECLARE @QueryStoreIntervalMinutes int = 60; -- default: last 1 hour
 /*
 1 hour = 60 minutes
@@ -78,7 +81,7 @@ DECLARE @EngineEdition int = CAST(SERVERPROPERTY('EngineEdition') AS int);
 IF @EngineEdition NOT IN (5,8)
     THROW 50005, 'This script runs on Azure SQL Database and Azure SQL Managed Instance only.', 1;
 
--- Bail out if recent CPU utilization is very high, to avoid impacting workloads
+-- Bail out if current CPU utilization is very high, to avoid impacting workloads
 IF EXISTS (
           SELECT 1
           FROM (
@@ -97,13 +100,16 @@ IF EXISTS (
           )
     THROW 50010, 'CPU utilization is too high. Execute script at a later time.', 1;
 
+IF DB_NAME() = 'master' AND @EngineEdition = 5
+    THROW 50015, 'Execute this script in a user database, not in the ''master'' database.', 1;
+
 -- Define all tips
 INSERT INTO @TipDefinition (tip_id, tip_name, confidence_percent, tip_url)
 VALUES
 (1000, 'Excessive MAXDOP on all replicas',                   90, 'https://aka.ms/sqldbtips#1000'),
 (1010, 'Excessive MAXDOP on primary',                        90, 'https://aka.ms/sqldbtips#1010'),
 (1020, 'Excessive MAXDOP on secondaries',                    90, 'https://aka.ms/sqldbtips#1020'),
-(1030, 'Compatibility level is not current',                 70, 'https://aka.ms/sqldbtips#1030'),
+(1030, 'Database compatibility level is older',              70, 'https://aka.ms/sqldbtips#1030'),
 (1040, 'Auto-create stats is disabled',                      95, 'https://aka.ms/sqldbtips#1040'),
 (1050, 'Auto-update stats is disabled',                      95, 'https://aka.ms/sqldbtips#1050'),
 (1060, 'RCSI is disabled',                                   80, 'https://aka.ms/sqldbtips#1060'),
@@ -120,7 +126,7 @@ VALUES
 (1160, 'Recent out of memory errors found',                  80, 'https://aka.ms/sqldbtips#1160'),
 (1165, 'Recent memory grant waits and timeouts found',       70, 'https://aka.ms/sqldbtips#1165'),
 (1170, 'Nonclustered indexes with low reads found',          60, 'https://aka.ms/sqldbtips#1170'),
-(1180, 'Data compression opportunities',                     60, 'https://aka.ms/sqldbtips#1180'),
+(1180, 'Data compression opportunities may exist',           60, 'https://aka.ms/sqldbtips#1180'),
 (1190, 'Log rate is close to limit',                         70, 'https://aka.ms/sqldbtips#1190'),
 (1200, 'Plan cache is bloated by single-use plans',          90, 'https://aka.ms/sqldbtips#1200'),
 (1210, 'Missing indexes',                                    70, 'https://aka.ms/sqldbtips#1210'),
@@ -190,7 +196,7 @@ WHERE @EngineEdition = 5
 -- Compatibility level
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1030 AS tip_id,
-       CONCAT('Current database compatibility level: ', CAST(d.compatibility_level AS varchar(3))) AS details
+       CONCAT('Present database compatibility level: ', CAST(d.compatibility_level AS varchar(3))) AS details
 FROM sys.dm_exec_valid_use_hints AS h
 CROSS JOIN sys.databases AS d
 WHERE h.name LIKE 'QUERY[_]OPTIMIZER[_]COMPATIBILITY[_]LEVEL[_]%'
@@ -586,6 +592,7 @@ SELECT o.object_id,
        i.type_desc AS index_type,
        p.partition_number,
        p.partition_size_mb,
+       p.data_compression_desc,
        ios.leaf_update_count * 1. / NULLIF((ios.range_scan_count + ios.leaf_insert_count + ios.leaf_delete_count + ios.leaf_update_count + ios.leaf_page_merge_count + ios.singleton_lookup_count), 0) AS update_ratio,
        ios.range_scan_count * 1. / NULLIF((ios.range_scan_count + ios.leaf_insert_count + ios.leaf_delete_count + ios.leaf_update_count + ios.leaf_page_merge_count + ios.singleton_lookup_count), 0) AS scan_ratio
 FROM sys.objects AS o
@@ -621,6 +628,7 @@ SELECT ps.object_id,
        ps.index_type,
        ps.partition_number,
        ps.partition_size_mb,
+       ps.data_compression_desc AS present_compression_type,
        CASE WHEN -- do not choose page compression when no index stats are available and update_ratio and scan_ratio are NULL, due to low confidence
                  (
                  ps.update_ratio < @CompressionPartitionUpdateRatioThreshold1 -- infrequently updated
@@ -656,6 +664,7 @@ AS
 SELECT object_id,
        index_name,
        index_type,
+       present_compression_type,
        new_compression_type,
        partition_number,
        partition_size_mb,
@@ -672,6 +681,7 @@ packed_partition_group AS
 SELECT object_id,
        index_name,
        index_type,
+       present_compression_type,
        new_compression_type,
        SUM(partition_size_mb) AS partition_range_size_mb,
        CONCAT(MIN(partition_number), '-', MAX(partition_number)) AS partition_range
@@ -679,6 +689,7 @@ FROM partition_compression_interval
 GROUP BY object_id,
          index_name,
          index_type,
+         present_compression_type,
          new_compression_type,
          interval_group
 HAVING COUNT(1) > 0
@@ -693,6 +704,7 @@ SELECT STRING_AGG(
                             ', index type: ', index_type COLLATE DATABASE_DEFAULT,
                             ', partition range: ', partition_range, 
                             ', partition range size (MB): ', FORMAT(partition_range_size_mb, 'N'), 
+                            ', present compression type: ', present_compression_type,
                             ', new compression type: ', new_compression_type
                             ) AS nvarchar(max)),
                  CONCAT(CHAR(13), CHAR(10))
@@ -1290,7 +1302,11 @@ WHERE pvss.database_id = DB_ID()
       (
       persistent_version_store_size_kb > @PVSMinimumSizeThresholdGB * 1024 * 1024 -- PVS is larger than n GB
       OR
+      (
       persistent_version_store_size_kb > @PVSToMaxSizeMinThresholdRatio * das.db_allocated_size_kb -- PVS is larger than n% of database allocated size
+      AND
+      persistent_version_store_size_kb > 1048576 -- for small databases, don't consider PVS smaller than 1 GB as large
+      )
       )
 )
 INSERT INTO @DetectedTip (tip_id, details)
@@ -1804,7 +1820,7 @@ SELECT 1320 AS tip_id,
        STRING_AGG(
                  CAST(CONCAT(
                             'query hash: ', CONVERT(varchar(30), query_hash, 1),
-                            ', ranks: (CPU time: ', CAST(cpu_time_rank AS varchar(11)),
+                            ', rankings: (CPU time: ', CAST(cpu_time_rank AS varchar(11)),
                             ', duration: ', CAST(duration_rank AS varchar(11)),
                             ', executions: ', CAST(executions_rank AS varchar(11)),
                             ', logical IO reads: ', CAST(logical_io_reads_rank AS varchar(11)),
