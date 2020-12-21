@@ -73,6 +73,11 @@ SET LOCK_TIMEOUT 5000; -- abort if a concurrent DDL operation holds a lock on me
 
 BEGIN TRY
 
+DECLARE @EngineEdition int = CAST(SERVERPROPERTY('EngineEdition') AS int);
+
+IF @EngineEdition NOT IN (5,8)
+    THROW 50005, 'This script runs on Azure SQL Database and Azure SQL Managed Instance only.', 1;
+
 -- Bail out if recent CPU utilization is very high, to avoid impacting workloads
 IF EXISTS (
           SELECT 1
@@ -171,7 +176,9 @@ SELECT 1020 AS tip_id,
              )
        AS details
 FROM sys.database_scoped_configurations
-WHERE name = N'MAXDOP'
+WHERE @EngineEdition = 5
+      AND
+      name = N'MAXDOP'
       AND
       value BETWEEN 1 AND 8
       AND
@@ -181,8 +188,9 @@ WHERE name = N'MAXDOP'
 ;
 
 -- Compatibility level
-INSERT INTO @DetectedTip (tip_id)
-SELECT 1030 AS tip_id
+INSERT INTO @DetectedTip (tip_id, details)
+SELECT 1030 AS tip_id,
+       CONCAT('Current database compatibility level: ', CAST(d.compatibility_level AS varchar(3))) AS details
 FROM sys.dm_exec_valid_use_hints AS h
 CROSS JOIN sys.databases AS d
 WHERE h.name LIKE 'QUERY[_]OPTIMIZER[_]COMPATIBILITY[_]LEVEL[_]%'
@@ -190,6 +198,7 @@ WHERE h.name LIKE 'QUERY[_]OPTIMIZER[_]COMPATIBILITY[_]LEVEL[_]%'
       d.name = DB_NAME()
       AND
       TRY_CAST(RIGHT(h.name, CHARINDEX('_', REVERSE(h.name)) - 1) AS smallint) > d.compatibility_level
+GROUP BY d.compatibility_level
 HAVING COUNT(1) > 1 -- Consider the last two compat levels (including the one possibly in preview) as current
 ;
 
@@ -280,7 +289,9 @@ guid_index AS
 SELECT QUOTENAME(OBJECT_SCHEMA_NAME(o.object_id)) COLLATE DATABASE_DEFAULT AS schema_name, 
        QUOTENAME(o.name) COLLATE DATABASE_DEFAULT AS object_name,
        QUOTENAME(i.name) COLLATE DATABASE_DEFAULT AS index_name,
-       i.type_desc COLLATE DATABASE_DEFAULT AS index_type
+       i.type_desc COLLATE DATABASE_DEFAULT AS index_type,
+       o.object_id,
+       i.index_id
 FROM sys.objects AS o
 INNER JOIN sys.indexes AS i
 ON o.object_id = i.object_id
@@ -330,7 +341,9 @@ SELECT 1100 AS tip_id,
                             'schema: ', schema_name, 
                             ', object: ', object_name, 
                             ', index: ', index_name, 
-                            ', type: ', index_type
+                            ', type: ', index_type,
+                            ', object_id: ', CAST(object_id AS varchar(11)),
+                            ', index_id: ', CAST(index_id AS varchar(11))
                             ) AS nvarchar(max)), 
                  CONCAT(CHAR(13), CHAR(10))
                  )
@@ -340,9 +353,10 @@ FROM guid_index
 HAVING COUNT(1) > 0
 ;
 
--- Force plan auto-tuning
-INSERT INTO @DetectedTip (tip_id)
-SELECT 1110 AS tip_id
+-- FLGP auto-tuning
+INSERT INTO @DetectedTip (tip_id, details)
+SELECT 1110 AS tip_id,
+       CONCAT('Reason: ', reason_desc) AS details
 FROM sys.database_automatic_tuning_options
 WHERE name = 'FORCE_LAST_GOOD_PLAN'
       AND
@@ -353,7 +367,9 @@ WHERE name = 'FORCE_LAST_GOOD_PLAN'
 INSERT INTO @DetectedTip (tip_id)
 SELECT 1120 AS tip_id
 FROM sys.database_files
-WHERE type_desc = 'ROWS'
+WHERE @EngineEdition = 5
+      AND
+      type_desc = 'ROWS'
       AND
       CAST(DATABASEPROPERTYEX(DB_NAME(), 'MaxSizeInBytes') AS bigint) <> -1 -- not applicable to Hyperscale
 HAVING SUM(CAST(FILEPROPERTY(name, 'SpaceUsed') AS bigint) * 8 / 1024.)
@@ -365,7 +381,9 @@ HAVING SUM(CAST(FILEPROPERTY(name, 'SpaceUsed') AS bigint) * 8 / 1024.)
 INSERT INTO @DetectedTip (tip_id)
 SELECT 1130 AS tip_id
 FROM sys.database_files
-WHERE type_desc = 'ROWS'
+WHERE @EngineEdition = 5
+      AND
+      type_desc = 'ROWS'
       AND
       CAST(DATABASEPROPERTYEX(DB_NAME(), 'MaxSizeInBytes') AS bigint) <> -1 -- not applicable to Hyperscale
       AND
@@ -400,7 +418,11 @@ SELECT SUM(duration_ms) / 60000 AS recent_history_duration_minutes,
        SUM(IIF(delta_cpu_active_ms > 0 AND delta_cpu_delayed_ms > 0, 1, 0)) AS count_cpu_delayed_intervals,
        CAST(AVG(IIF(delta_cpu_active_ms > 0 AND delta_cpu_delayed_ms > 0, CAST(delta_cpu_delayed_ms AS decimal(12,0)) / delta_cpu_active_ms, NULL)) * 100 AS decimal(5,2)) AS avg_cpu_delay_percent
 FROM sys.dm_resource_governor_workload_groups_history_ex
-WHERE name like 'UserPrimaryGroup.DB%'
+WHERE @EngineEdition = 5
+      AND
+      name like 'UserPrimaryGroup.DB%'
+      AND
+      TRY_CAST(RIGHT(name, LEN(name) - LEN('UserPrimaryGroup.DB') - 2) AS int) = DB_ID()
 )
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1150 AS tip_id,
@@ -419,10 +441,14 @@ WITH oom AS
 SELECT SUM(duration_ms) / 60000 AS recent_history_duration_minutes,
        SUM(delta_out_of_memory_count) AS count_oom
 FROM sys.dm_resource_governor_resource_pools_history_ex
-WHERE -- Consider user resource pool only
+WHERE @EngineEdition = 5
+      AND
+      -- Consider user resource pool only
+      (
       name LIKE 'SloSharedPool%'
       OR
       name LIKE 'UserPool%'
+      )
 )
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1160 AS tip_id,
@@ -446,10 +472,14 @@ SELECT SUM(duration_ms) / 60000 AS recent_history_duration_minutes,
        SUM(delta_memgrant_waiter_count) AS count_memgrant_waiter,
        SUM(delta_memgrant_timeout_count) AS count_memgrant_timeout
 FROM sys.dm_resource_governor_resource_pools_history_ex
-WHERE -- Consider user resource pool only
+WHERE @EngineEdition = 5
+      AND
+      -- Consider user resource pool only
+      (
       name LIKE 'SloSharedPool%'
       OR
       name LIKE 'UserPool%'
+      )
 )
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1165 AS tip_id,
@@ -688,7 +718,9 @@ SELECT end_time,
        avg_log_write_percent,
        IIF(avg_log_write_percent > @HighLogRateThresholdPercent, 1, 0) AS high_log_rate_indicator
 FROM sys.dm_db_resource_stats
-WHERE DATABASEPROPERTYEX(DB_NAME(), 'Updateability') = 'READ_WRITE' -- only produce this on primary
+WHERE @EngineEdition = 5
+      AND
+      DATABASEPROPERTYEX(DB_NAME(), 'Updateability') = 'READ_WRITE' -- only produce this on primary
 ),
 pre_packed_log_rate_snapshot AS
 (
@@ -816,7 +848,7 @@ SELECT 1220 AS tip_id,
 FROM sys.dm_database_replica_states
 WHERE DATABASEPROPERTYEX(DB_NAME(), 'Edition') IN ('Premium','BusinessCritical')
       AND
-      is_primary_replica = 0
+      is_primary_replica = 0 -- redo details only available on secondary
       AND
       is_local = 1
       AND
@@ -856,9 +888,13 @@ SELECT wgh.snapshot_time,
           ) AS significant_io_rg_impact_indicator -- over n% of IO stall is spent in SQL IO RG
 FROM sys.dm_resource_governor_workload_groups_history_ex AS wgh
 CROSS JOIN sys.dm_user_db_resource_governance AS rg
-WHERE rg.database_id = DB_ID()
+WHERE @EngineEdition = 5
+      AND
+      rg.database_id = DB_ID()
       AND
       wgh.name like 'UserPrimaryGroup.DB%'
+      AND
+      TRY_CAST(RIGHT(wgh.name, LEN(wgh.name) - LEN('UserPrimaryGroup.DB') - 2) AS int) = DB_ID()
 ),
 pre_packed_io_rg_snapshot AS
 (
@@ -1059,7 +1095,9 @@ SELECT rph.snapshot_time,
           ) AS significant_io_rg_impact_indicator -- over n% of IO stall is spent in SQL IO RG
 FROM sys.dm_resource_governor_resource_pools_history_ex AS rph
 CROSS JOIN sys.dm_user_db_resource_governance AS rg
-WHERE rg.database_id = DB_ID()
+WHERE @EngineEdition = 5
+      AND
+      rg.database_id = DB_ID()
       AND
       -- Consider user resource pool only
       (
