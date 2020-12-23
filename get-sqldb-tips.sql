@@ -2,13 +2,16 @@
 Returns a set of tips to improve database design, health, and performance in Azure SQL Database.
 For a detailed description and the latest version of the script, see https://aka.ms/sqldbtips
 
-v20201221.1
+v20201222.1
 */
+
+-- Set to 1 to output tips as a JSON value
+DECLARE @JSONOutput bit = 0;
 
 -- Debug flag to return all tips regardless of database state
 DECLARE @ReturnAllTips bit = 0;
 
--- Next three variables apply to "Top queries" hint, adjust as needed
+-- Next three variables apply to "Top queries" hint, adjust if needed
 
 -- The length of recent time interval to use when determining top queries
 DECLARE @QueryStoreIntervalMinutes int = 60; -- default: last 1 hour
@@ -57,7 +60,10 @@ DECLARE @HighLogRateThresholdPercent decimal(5,2) = 80, -- Minimum log rate as p
         @HighGeoReplLagMinThresholdSeconds int = 10, -- The minimum geo-replication lag to be considered significant in the "Geo-replication health" tip
         @RecentGeoReplTranTimeWindowLengthSeconds int = 300, -- The length of time window that defines recent geo-replicated transactions in the "Geo-replication health" tip
         @MinEmptyPartitionCount tinyint = 2, -- The number of empty partitions at head end considered required in the "Last partitions are not empty" tip
-        @QueryStoreTopQueryCount tinyint = 2 -- The number of top queries along each dimension (duration, CPU time, etc.) to consider in the "Top queries" tip
+        @QueryStoreTopQueryCount tinyint = 2, -- The number of top queries along each dimension (duration, CPU time, etc.) to consider in the "Top queries" tip
+        @TempdbDataAllocatedToMaxsizeThresholdRatio decimal(3,2) = 0.8, -- The ratio of tempdb allocated data space to data MAXSIZE that is considered as being too high in the "Tempdb allocated data space is close to MAXSIZE" tip
+        @TempdbLogAllocatedToMaxsizeThresholdRatio decimal(3,2) = 0.6, -- The ratio of tempdb allocated log space to log MAXSIZE that is considered as being too high in the "Tempdb allocated log space is close to MAXSIZE" tip
+        @TempdbUsedToMaxsizeSpaceThresholdRatio decimal(3,2) = 0.8 -- The ratio of tempdb used space to MAXSIZE that is considered as being too high in the "Tempdb used size is close to MAXSIZE" tip
 ;
 
 DECLARE @TipDefinition table (
@@ -140,7 +146,10 @@ VALUES
 (1290, 'Clustered columnstore candidates found',             50, 'https://aka.ms/sqldbtips#1290'),
 (1300, 'Geo-replication state may be unhealthy',             70, 'https://aka.ms/sqldbtips#1300'),
 (1310, 'Last partitions are not empty',                      80, 'https://aka.ms/sqldbtips#1310'),
-(1320, 'Top queries',                                        90, 'https://aka.ms/sqldbtips#1320')
+(1320, 'Top queries',                                        90, 'https://aka.ms/sqldbtips#1320'),
+(1330, 'Tempdb allocated data size is close to MAXSIZE',     70, 'https://aka.ms/sqldbtips#1330'),
+(1340, 'Tempdb allocated log size is close to MAXSIZE',      80, 'https://aka.ms/sqldbtips#1340'),
+(1350, 'Tempdb used size is close to MAXSIZE',               95, 'https://aka.ms/sqldbtips#1350')
 ;
 
 -- MAXDOP
@@ -1841,25 +1850,117 @@ HAVING COUNT(1) > 0
 OPTION (RECOMPILE)
 ;
 
--- Return detected tips
-SELECT td.tip_id,
-       td.tip_name,
-       td.confidence_percent,
-       td.tip_url,
-       d.details
-FROM @TipDefinition AS td
-LEFT JOIN @DetectedTip AS dt
-ON dt.tip_id = td.tip_id
-OUTER APPLY (
-            SELECT dt.details AS [processing-instruction(details)]
-            WHERE dt.details IS NOT NULL
-            FOR XML PATH (''), TYPE
-            ) d (details)
-WHERE dt.tip_id IS NOT NULL
+-- tempdb allocated data and log size close to maxsize
+WITH tempdb_file_size AS
+(
+SELECT type_desc AS file_type,
+       SUM(size * 8 / 1024.) AS allocated_size_mb,
+       SUM(max_size * 8 / 1024.) AS max_size_mb,
+       SUM(IIF(type_desc = 'ROWS', 1, NULL)) AS count_files
+FROM tempdb.sys.database_files
+WHERE type_desc IN ('ROWS','LOG')
+GROUP BY type_desc
+)
+INSERT INTO @DetectedTip (tip_id, details)
+SELECT CASE file_type WHEN 'ROWS' THEN 1330 WHEN 'LOG' THEN 1340 END AS tip_id,
+       CONCAT(
+             'tempdb allocated ', CASE file_type WHEN 'ROWS' THEN 'data' WHEN 'LOG' THEN 'log' END , ' size (MB): ', FORMAT(allocated_size_mb, '#,0.00'),
+             ', tempdb ', CASE file_type WHEN 'ROWS' THEN 'data' WHEN 'LOG' THEN 'log' END, ' MAXSIZE (MB): ', FORMAT(max_size_mb, '#,0.00'),
+             ', tempdb data files: ' + CAST(count_files AS varchar(11))
+             )
+FROM tempdb_file_size
+WHERE (file_type = 'ROWS' AND allocated_size_mb / NULLIF(max_size_mb, 0) > @TempdbDataAllocatedToMaxsizeThresholdRatio)
       OR
-      @ReturnAllTips = 1
-ORDER BY confidence_percent DESC
+      (file_type = 'LOG' AND allocated_size_mb / NULLIF(max_size_mb, 0) > @TempdbLogAllocatedToMaxsizeThresholdRatio)
 ;
+
+-- tempdb used data size close to maxsize
+DROP TABLE IF EXISTS #tempdb_space_used;
+
+CREATE TABLE #tempdb_space_used
+(
+database_name sysname NULL,
+database_size varchar(18) NULL,
+unallocated_space varchar(18) NULL,
+reserved varchar(18) NULL,
+data varchar(18) NULL,
+index_size varchar(18) NULL,
+unused varchar(18) NULL
+);
+
+INSERT INTO #tempdb_space_used
+EXEC sys.sp_spaceused @oneresultset = 1;
+
+IF @@ROWCOUNT <> 1
+    THROW 50020, 'sp_spaceused returned the number of rows other than 1.', 1;
+
+WITH tempdb_data_maxsize AS
+(
+SELECT SUM(max_size * 8 / 1024.) AS max_size_mb,
+       SUM(IIF(type_desc = 'ROWS', 1, NULL)) AS count_files
+FROM tempdb.sys.database_files
+WHERE type_desc = 'ROWS'
+),
+tempdb_data_size AS
+(
+SELECT TRY_CAST(LEFT(tsu.reserved, LEN(tsu.reserved) - 3) AS decimal) / 1024. AS used_space_mb,
+       tdm.max_size_mb,
+       tdm.count_files
+FROM tempdb_data_maxsize AS tdm
+CROSS JOIN #tempdb_space_used AS tsu
+)
+INSERT INTO @DetectedTip (tip_id, details)
+SELECT 1350 AS tip_id,
+       CONCAT(
+             'tempdb used data size (MB): ', FORMAT(used_space_mb, '#,0.00'),
+             ', tempdb data MAXSIZE (MB): ', FORMAT(max_size_mb, '#,0.00'),
+             ', tempdb data files: ' + CAST(count_files AS varchar(11))
+             )
+FROM tempdb_data_size
+WHERE used_space_mb / NULLIF(max_size_mb, 0) > @TempdbUsedToMaxsizeSpaceThresholdRatio
+;
+
+-- Return detected tips
+
+IF @JSONOutput = 0
+    SELECT td.tip_id,
+           td.tip_name,
+           td.confidence_percent,
+           td.tip_url,
+           d.details
+    FROM @TipDefinition AS td
+    LEFT JOIN @DetectedTip AS dt
+    ON dt.tip_id = td.tip_id
+    OUTER APPLY (
+                SELECT dt.details AS [processing-instruction(details)]
+                WHERE dt.details IS NOT NULL
+                FOR XML PATH (''), TYPE
+                ) d (details)
+    WHERE dt.tip_id IS NOT NULL
+          OR
+          @ReturnAllTips = 1
+    ORDER BY confidence_percent DESC
+    ;
+ELSE IF @JSONOutput = 1
+    WITH tips AS -- flatten for JSON output
+    (
+    SELECT td.tip_id,
+           td.tip_name,
+           td.confidence_percent,
+           td.tip_url,
+           dt.details
+    FROM @TipDefinition AS td
+    LEFT JOIN @DetectedTip AS dt
+    ON dt.tip_id = td.tip_id
+    WHERE dt.tip_id IS NOT NULL
+          OR
+          @ReturnAllTips = 1
+    )
+    SELECT *
+    FROM tips
+    ORDER BY confidence_percent DESC
+    FOR JSON AUTO
+    ;
 
 END TRY
 BEGIN CATCH
