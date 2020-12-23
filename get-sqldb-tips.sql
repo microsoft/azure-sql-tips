@@ -2,7 +2,7 @@
 Returns a set of tips to improve database design, health, and performance in Azure SQL Database.
 For a detailed description and the latest version of the script, see https://aka.ms/sqldbtips
 
-v20201222.1
+v20201223.1
 */
 
 -- Set to 1 to output tips as a JSON value
@@ -13,8 +13,9 @@ DECLARE @ReturnAllTips bit = 0;
 
 -- Next three variables apply to "Top queries" hint, adjust if needed
 
--- The length of recent time interval to use when determining top queries
-DECLARE @QueryStoreIntervalMinutes int = 60; -- default: last 1 hour
+-- The length of recent time interval to use when determining top queries. Default is last 1 hour.
+-- Setting this to NULL disables the "Top queries" hint
+DECLARE @QueryStoreIntervalMinutes int = 60;
 /*
 1 hour = 60 minutes
 3 hours = 180 minutes
@@ -63,7 +64,7 @@ DECLARE @HighLogRateThresholdPercent decimal(5,2) = 80, -- Minimum log rate as p
         @QueryStoreTopQueryCount tinyint = 2, -- The number of top queries along each dimension (duration, CPU time, etc.) to consider in the "Top queries" tip
         @TempdbDataAllocatedToMaxsizeThresholdRatio decimal(3,2) = 0.8, -- The ratio of tempdb allocated data space to data MAXSIZE that is considered as being too high in the "Tempdb allocated data space is close to MAXSIZE" tip
         @TempdbLogAllocatedToMaxsizeThresholdRatio decimal(3,2) = 0.6, -- The ratio of tempdb allocated log space to log MAXSIZE that is considered as being too high in the "Tempdb allocated log space is close to MAXSIZE" tip
-        @TempdbUsedToMaxsizeSpaceThresholdRatio decimal(3,2) = 0.8 -- The ratio of tempdb used space to MAXSIZE that is considered as being too high in the "Tempdb used size is close to MAXSIZE" tip
+        @TempdbDataUsedToMaxsizeThresholdRatio decimal(3,2) = 0.8 -- The ratio of tempdb used space to MAXSIZE that is considered as being too high in the "Tempdb used size is close to MAXSIZE" tip
 ;
 
 DECLARE @TipDefinition table (
@@ -132,7 +133,7 @@ VALUES
 (1160, 'Recent out of memory errors found',                  80, 'https://aka.ms/sqldbtips#1160'),
 (1165, 'Recent memory grant waits and timeouts found',       70, 'https://aka.ms/sqldbtips#1165'),
 (1170, 'Nonclustered indexes with low reads found',          60, 'https://aka.ms/sqldbtips#1170'),
-(1180, 'Data compression opportunities may exist',           60, 'https://aka.ms/sqldbtips#1180'),
+(1180, 'ROW or PAGE compression opportunities may exist',    65, 'https://aka.ms/sqldbtips#1180'),
 (1190, 'Log rate is close to limit',                         70, 'https://aka.ms/sqldbtips#1190'),
 (1200, 'Plan cache is bloated by single-use plans',          90, 'https://aka.ms/sqldbtips#1200'),
 (1210, 'Missing indexes',                                    70, 'https://aka.ms/sqldbtips#1210'),
@@ -147,9 +148,9 @@ VALUES
 (1300, 'Geo-replication state may be unhealthy',             70, 'https://aka.ms/sqldbtips#1300'),
 (1310, 'Last partitions are not empty',                      80, 'https://aka.ms/sqldbtips#1310'),
 (1320, 'Top queries',                                        90, 'https://aka.ms/sqldbtips#1320'),
-(1330, 'Tempdb allocated data size is close to MAXSIZE',     70, 'https://aka.ms/sqldbtips#1330'),
-(1340, 'Tempdb allocated log size is close to MAXSIZE',      80, 'https://aka.ms/sqldbtips#1340'),
-(1350, 'Tempdb used size is close to MAXSIZE',               95, 'https://aka.ms/sqldbtips#1350')
+(1330, 'Tempdb data allocated size is close to MAXSIZE',     70, 'https://aka.ms/sqldbtips#1330'),
+(1340, 'Tempdb data used size is close to MAXSIZE',          95, 'https://aka.ms/sqldbtips#1340'),
+(1350, 'Tempdb log allocated size is close to MAXSIZE',      80, 'https://aka.ms/sqldbtips#1350')
 ;
 
 -- MAXDOP
@@ -285,19 +286,14 @@ WHERE name = DB_NAME()
 ;
 
 -- Btree indexes with uniqueidentifier leading column
-WITH object_size AS
+WITH 
+object_size AS
 (
-SELECT p.object_id,
-       SUM(au.used_pages) * 8 / 1024. AS object_size_mb
-FROM sys.partitions AS p
-INNER JOIN sys.allocation_units AS au
-ON (
-   (p.hobt_id = au.container_id AND au.type_desc IN ('IN_ROW_DATA','ROW_OVERFLOW_DATA'))
-   OR
-   (p.partition_id = au.container_id AND au.type_desc = 'LOB_DATA')
-   )
-WHERE p.index_id IN (0,1) -- clustered index or heap
-GROUP BY p.object_id
+SELECT object_id,
+       SUM(used_page_count) * 8 / 1024. AS object_size_mb
+FROM sys.dm_db_partition_stats
+WHERE index_id IN (0,1) -- clustered index or heap
+GROUP BY object_id
 ),
 guid_index AS
 (
@@ -376,6 +372,8 @@ FROM sys.database_automatic_tuning_options
 WHERE name = 'FORCE_LAST_GOOD_PLAN'
       AND
       actual_state_desc <> 'ON'
+      AND
+      DATABASEPROPERTYEX(DB_NAME(), 'Updateability') = 'READ_WRITE' -- only produce this on primary
 ;
 
 -- Used space close to maxsize
@@ -580,14 +578,14 @@ SELECT p.object_id,
        p.index_id,
        p.partition_number,
        p.data_compression_desc,
-       SUM(au.used_pages) * 8 / 1024. AS partition_size_mb
+       SUM(ps.used_page_count) * 8 / 1024. AS partition_size_mb
 FROM sys.partitions AS p
-INNER JOIN sys.allocation_units AS au
-ON (
-   (p.hobt_id = au.container_id AND au.type_desc IN ('IN_ROW_DATA','ROW_OVERFLOW_DATA'))
-   OR
-   (p.partition_id = au.container_id AND au.type_desc = 'LOB_DATA')
-   )
+INNER JOIN sys.dm_db_partition_stats AS ps
+ON p.partition_id = ps.partition_id
+   AND
+   p.object_id = ps.object_id
+   AND
+   p.index_id = ps.index_id
 GROUP BY p.object_id,
          p.index_id,
          p.partition_number,
@@ -1389,14 +1387,14 @@ SELECT p.object_id,
        p.index_id,
        p.partition_number,
        p.rows,
-       SUM(au.used_pages) * 8 / 1024. AS partition_size_mb
+       SUM(ps.used_page_count) * 8 / 1024. AS partition_size_mb
 FROM sys.partitions AS p
-INNER JOIN sys.allocation_units AS au
-ON (
-   (p.hobt_id = au.container_id AND au.type_desc IN ('IN_ROW_DATA','ROW_OVERFLOW_DATA'))
-   OR
-   (p.partition_id = au.container_id AND au.type_desc = 'LOB_DATA')
-   )
+INNER JOIN sys.dm_db_partition_stats AS ps
+ON p.partition_id = ps.partition_id
+   AND
+   p.object_id = ps.object_id
+   AND
+   p.index_id = ps.index_id
 WHERE p.data_compression_desc IN ('NONE','ROW','PAGE')
       AND
       -- exclude all partitions of tables with NCCI, and all NCI partitions of tables with CCI
@@ -1556,52 +1554,37 @@ FROM geo_replication_link_details
 ;
 
 -- Last partitions are not empty
-WITH partition_count AS
+WITH 
+partition_stat AS
 (
-SELECT p.object_id,
-       p.partition_number,
-       p.partition_id,
-       p.hobt_id,
-       p.rows,
-       COUNT(1) OVER (PARTITION BY p.object_id) AS partition_count
-FROM sys.partitions AS p
-WHERE p.index_id IN (0,1)
-),
-alloc_unit AS
-(
-SELECT container_id,
-       type_desc,
-       SUM(used_pages) * 8 / 1024. AS size_mb
-FROM sys.allocation_units
-GROUP BY container_id,
-         type_desc
+SELECT object_id,
+       partition_number,
+       reserved_page_count * 8 / 1024. AS size_mb,
+       row_count,
+       COUNT(1) OVER (PARTITION BY object_id) AS partition_count
+FROM sys.dm_db_partition_stats
+WHERE index_id IN (0,1)
 ),
 object_last_partition AS
 (
-SELECT QUOTENAME(OBJECT_SCHEMA_NAME(pc.object_id)) COLLATE DATABASE_DEFAULT AS schema_name,
-       QUOTENAME(OBJECT_NAME(pc.object_id)) COLLATE DATABASE_DEFAULT AS object_name,
-       pc.partition_count,
-       pc.partition_number,
-       SUM(pc.rows) AS partition_rows,
-       SUM(au.size_mb) AS partition_size_mb
-FROM partition_count AS pc
+SELECT QUOTENAME(OBJECT_SCHEMA_NAME(ps.object_id)) COLLATE DATABASE_DEFAULT AS schema_name,
+       QUOTENAME(OBJECT_NAME(ps.object_id)) COLLATE DATABASE_DEFAULT AS object_name,
+       ps.partition_count,
+       ps.partition_number,
+       SUM(ps.row_count) AS partition_rows,
+       SUM(ps.size_mb) AS partition_size_mb
+FROM partition_stat AS ps
 INNER JOIN sys.objects AS o
-ON pc.object_id = o.object_id
-INNER JOIN alloc_unit AS au
-ON (
-   (pc.hobt_id = au.container_id AND au.type_desc IN ('IN_ROW_DATA','ROW_OVERFLOW_DATA'))
-   OR
-   (pc.partition_id = au.container_id AND au.type_desc = 'LOB_DATA')
-   )
-WHERE pc.partition_count > 1
+ON ps.object_id = o.object_id
+WHERE ps.partition_count > 1
       AND
-      pc.partition_count - pc.partition_number < @MinEmptyPartitionCount -- Consider last n partitions
+      ps.partition_count - ps.partition_number < @MinEmptyPartitionCount -- Consider last n partitions
       AND
       o.is_ms_shipped = 0
-GROUP BY pc.object_id,
-         pc.partition_count,
-         pc.partition_number
-HAVING SUM(pc.rows) > 0
+GROUP BY ps.object_id,
+         ps.partition_count,
+         ps.partition_number
+HAVING SUM(ps.row_count) > 0
 )
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1310 AS tip_id,
@@ -1850,31 +1833,9 @@ HAVING COUNT(1) > 0
 OPTION (RECOMPILE)
 ;
 
--- tempdb allocated data and log size close to maxsize
-WITH tempdb_file_size AS
-(
-SELECT type_desc AS file_type,
-       SUM(size * 8 / 1024.) AS allocated_size_mb,
-       SUM(max_size * 8 / 1024.) AS max_size_mb,
-       SUM(IIF(type_desc = 'ROWS', 1, NULL)) AS count_files
-FROM tempdb.sys.database_files
-WHERE type_desc IN ('ROWS','LOG')
-GROUP BY type_desc
-)
-INSERT INTO @DetectedTip (tip_id, details)
-SELECT CASE file_type WHEN 'ROWS' THEN 1330 WHEN 'LOG' THEN 1340 END AS tip_id,
-       CONCAT(
-             'tempdb allocated ', CASE file_type WHEN 'ROWS' THEN 'data' WHEN 'LOG' THEN 'log' END , ' size (MB): ', FORMAT(allocated_size_mb, '#,0.00'),
-             ', tempdb ', CASE file_type WHEN 'ROWS' THEN 'data' WHEN 'LOG' THEN 'log' END, ' MAXSIZE (MB): ', FORMAT(max_size_mb, '#,0.00'),
-             ', tempdb data files: ' + CAST(count_files AS varchar(11))
-             )
-FROM tempdb_file_size
-WHERE (file_type = 'ROWS' AND allocated_size_mb / NULLIF(max_size_mb, 0) > @TempdbDataAllocatedToMaxsizeThresholdRatio)
-      OR
-      (file_type = 'LOG' AND allocated_size_mb / NULLIF(max_size_mb, 0) > @TempdbLogAllocatedToMaxsizeThresholdRatio)
-;
+-- tempdb data and log size close to maxsize
 
--- tempdb used data size close to maxsize
+-- get tempdb used (aka reserved) size
 DROP TABLE IF EXISTS #tempdb_space_used;
 
 CREATE TABLE #tempdb_space_used
@@ -1889,35 +1850,58 @@ unused varchar(18) NULL
 );
 
 INSERT INTO #tempdb_space_used
-EXEC sys.sp_spaceused @oneresultset = 1;
+EXEC tempdb.sys.sp_spaceused @oneresultset = 1;
 
 IF @@ROWCOUNT <> 1
     THROW 50020, 'sp_spaceused returned the number of rows other than 1.', 1;
 
-WITH tempdb_data_maxsize AS
+WITH tempdb_file_size AS
 (
-SELECT SUM(max_size * 8 / 1024.) AS max_size_mb,
+SELECT type_desc AS file_type,
+       SUM(size * 8 / 1024.) AS allocated_size_mb,
+       SUM(max_size * 8 / 1024.) AS max_size_mb,
        SUM(IIF(type_desc = 'ROWS', 1, NULL)) AS count_files
 FROM tempdb.sys.database_files
-WHERE type_desc = 'ROWS'
+WHERE type_desc IN ('ROWS','LOG')
+GROUP BY type_desc
 ),
-tempdb_data_size AS
+tempdb_tip AS
 (
-SELECT TRY_CAST(LEFT(tsu.reserved, LEN(tsu.reserved) - 3) AS decimal) / 1024. AS used_space_mb,
-       tdm.max_size_mb,
-       tdm.count_files
-FROM tempdb_data_maxsize AS tdm
-CROSS JOIN #tempdb_space_used AS tsu
+SELECT tfs.file_type,
+       tt.space_type,
+       tfs.allocated_size_mb,
+       TRY_CAST(LEFT(tsu.reserved, LEN(tsu.reserved) - 3) AS decimal) / 1024. AS used_size_mb,
+       tfs.max_size_mb,
+       tfs.count_files
+FROM tempdb_file_size AS tfs
+INNER JOIN (
+           VALUES ('ROWS', 'allocated'),
+                  ('ROWS', 'used'),
+                  ('LOG', 'allocated')
+           ) AS tt (file_type, space_type)
+ON tfs.file_type = tt.file_type
+LEFT JOIN #tempdb_space_used AS tsu
+ON tfs.file_type = 'ROWS'
 )
 INSERT INTO @DetectedTip (tip_id, details)
-SELECT 1350 AS tip_id,
+SELECT CASE WHEN file_type = 'ROWS' AND space_type = 'allocated' THEN 1330
+            WHEN file_type = 'ROWS' AND space_type = 'used' THEN 1340
+            WHEN file_type = 'LOG' THEN 1350 
+       END 
+       AS tip_id,
        CONCAT(
-             'tempdb used data size (MB): ', FORMAT(used_space_mb, '#,0.00'),
-             ', tempdb data MAXSIZE (MB): ', FORMAT(max_size_mb, '#,0.00'),
+             'tempdb ', CASE file_type WHEN 'ROWS' THEN 'data' WHEN 'LOG' THEN 'log' END , ' allocated size (MB): ', FORMAT(allocated_size_mb, '#,0.00'),
+             ', tempdb data used size (MB): ' + FORMAT(used_size_mb, '#,0.00'),
+             ', tempdb ', CASE file_type WHEN 'ROWS' THEN 'data' WHEN 'LOG' THEN 'log' END, ' MAXSIZE (MB): ', FORMAT(max_size_mb, '#,0.00'),
              ', tempdb data files: ' + CAST(count_files AS varchar(11))
              )
-FROM tempdb_data_size
-WHERE used_space_mb / NULLIF(max_size_mb, 0) > @TempdbUsedToMaxsizeSpaceThresholdRatio
+       AS details
+FROM tempdb_tip
+WHERE (file_type = 'ROWS' AND space_type = 'allocated' AND allocated_size_mb / NULLIF(max_size_mb, 0) > @TempdbDataAllocatedToMaxsizeThresholdRatio)
+      OR
+      (file_type = 'ROWS' AND space_type = 'used' AND used_size_mb / NULLIF(max_size_mb, 0) > @TempdbDataUsedToMaxsizeThresholdRatio)
+      OR
+      (file_type = 'LOG'  AND space_type = 'allocated' AND allocated_size_mb / NULLIF(max_size_mb, 0) > @TempdbLogAllocatedToMaxsizeThresholdRatio)
 ;
 
 -- Return detected tips
