@@ -2,7 +2,7 @@
 Returns a set of tips to improve database design, health, and performance in Azure SQL Database.
 For a detailed description and the latest version of the script, see https://aka.ms/sqldbtips
 
-v20201223.1
+v20201227.1
 */
 
 -- Set to 1 to output tips as a JSON value
@@ -33,44 +33,109 @@ DECLARE @QueryStoreCustomTimeStart datetimeoffset -- = '2021-01-01 00:01 +00:00'
 DECLARE @QueryStoreCustomTimeEnd datetimeoffset -- = '2021-12-31 23:59 +00:00';
 
 -- Configurable thresholds
-DECLARE @HighLogRateThresholdPercent decimal(5,2) = 80, -- Minimum log rate as percentage of SLO limit that is considered as being too high in the "Log rate close to limit" tip
-        @GuidLeadingColumnObjectMinSizeMB int = 1024, -- Minimum table size to be considered in the "GUID leading columns in btree indexes" tip
-        @UsedToMaxsizeSpaceThresholdRatio decimal(3,2) = 0.8, -- The ratio of used space to database MAXSIZE that is considered as being too high in the "Used space close to MAXSIZE" tip
-        @AllocatedToMaxsizeSpaceThresholdRatio decimal(3,2) = 0.8, -- The ratio of allocated space to database MAXSIZE that is considered as being too high in the "Allocated space close to MAXSIZE" tip
-        @UsedToAllocatedSpaceThresholdRatio decimal(3,2) = 0.3, -- The ratio of used space to allocated space that is considered as being too low in the "Allocated space much larger than used space" tip
-        @UsedToAllocatedSpaceDbMinSizeMB int = 10240, -- Minimum database size to be considered for the "Allocated space much larger than used space" tip
-        @CPUThrottlingDelayThresholdPercent decimal(5,2) = 20, -- Minimum percentage of CPU RG delay to be considered as significant CPU throttling in "Recent CPU throttling" tip
-        @IndexReadWriteThresholdRatio decimal(3,2) = 0.1, -- The ratio of all index reads to index writes that is considered as being too low in the "Low reads nonclustered indexes" tip
-        @CompressionPartitionUpdateRatioThreshold1 decimal(3,2) = 0.2, -- The maximum ratio of updates to all operations to define "infrequent updates" in the "Data compression opportunities" tip
-        @CompressionPartitionUpdateRatioThreshold2 decimal(3,2) = 0.5, -- The maximum ratio of updates to all operations to define "more frequent but not frequent enough updates" in the "Data compression opportunities" tip
-        @CompressionPartitionScanRatioThreshold1 decimal(3,2) = 0.5, -- The minimum ratio of scans to all operations to define "frequent enough scans" in the "Data compression opportunities" tip
-        @CompressionCPUHeadroomThreshold1 decimal(5,2) = 60, -- Maximum CPU usage percentage to be considered as sufficient CPU headroom in the "Data compression opportunities" tip
-        @CompressionCPUHeadroomThreshold2 decimal(5,2) = 80, -- Minimum CPU usage percentage to be considered as insufficient CPU headroom in the "Data compression opportunities" tip
-        @CompressionMinResourceStatSamples smallint = 30, -- Minimum required number of resource stats sampling intervals in the "Data compression opportunities" tip
-        @SingleUsePlanSizeThresholdMB int = 512, -- Minimum required per-db size of single-use plans to be considered as significant in the "Plan cache bloat from single-use plans" tip
-        @SingleUseTotalPlanSizeRatioThreshold decimal(3,2) = 0.3, -- The minimum ratio of single-use plans size to total plan size per database to be considered as significant in the "Plan cache bloat from single-use plans" tip
-        @MissingIndexAvgUserImpactThreshold decimal(5,2) = 80, -- The minimum user impact for a missing index to be considered as significant in the "Missing indexes" tip
-        @RedoQueueSizeThresholdMB int = 1024, -- The minimum size of redo queue on secondaries to be considered as significant in the "Redo queue is large" tip
-        @GroupIORGAtLimitThresholdRatio decimal(3,2) = 0.9, -- The minimum ratio of governed IOPS issued to workload group IOPS limit that is considered significant in the "IOPS at SLO workload group limit" tip
-        @GroupIORGImpactRatio decimal(3,2) = 0.8, -- The minimum ratio of IO RG delay time to total IO stall time that is considered significant in the "Significant workload group IO RG impact" tip
-        @PoolIORGAtLimitThresholdRatio decimal(3,2) = 0.9, -- The minimum ratio of governed IOPS issued to resource pool IOPS limit that is considered significant in the "IOPS at SLO resource pool limit" tip
-        @PoolIORGImpactRatio decimal(3,2) = 0.8, -- The minimum ratio of IO RG delay time to total IO stall time that is considered significant in the "Significant resource pool IO RG impact" tip
-        @PVSMinimumSizeThresholdGB int = 100, -- The minimum size of persistent version store (PVS) to be considered significant in the "PVS is large" tip
-        @PVSToMaxSizeMinThresholdRatio decimal(3,2) = 0.3, -- The minimum ratio of PVS size to database maxsize to be considered significant in the "PVS is large" tip
-        @CCICandidateMinSizeGB int = 10, -- The minimum table size to be considered in the "CCI candidates" tip
-        @HighGeoReplLagMinThresholdSeconds int = 10, -- The minimum geo-replication lag to be considered significant in the "Geo-replication health" tip
-        @RecentGeoReplTranTimeWindowLengthSeconds int = 300, -- The length of time window that defines recent geo-replicated transactions in the "Geo-replication health" tip
-        @MinEmptyPartitionCount tinyint = 2, -- The number of empty partitions at head end considered required in the "Last partitions are not empty" tip
-        @QueryStoreTopQueryCount tinyint = 2, -- The number of top queries along each dimension (duration, CPU time, etc.) to consider in the "Top queries" tip
-        @TempdbDataAllocatedToMaxsizeThresholdRatio decimal(3,2) = 0.8, -- The ratio of tempdb allocated data space to data MAXSIZE that is considered as being too high in the "Tempdb allocated data space is close to MAXSIZE" tip
-        @TempdbLogAllocatedToMaxsizeThresholdRatio decimal(3,2) = 0.6, -- The ratio of tempdb allocated log space to log MAXSIZE that is considered as being too high in the "Tempdb allocated log space is close to MAXSIZE" tip
-        @TempdbDataUsedToMaxsizeThresholdRatio decimal(3,2) = 0.8 -- The ratio of tempdb used space to MAXSIZE that is considered as being too high in the "Tempdb used size is close to MAXSIZE" tip
+DECLARE 
+
+-- 1100: Minimum table size to be considered
+@GuidLeadingColumnObjectMinSizeMB int = 1024,
+
+-- 1120: The ratio of used space to database MAXSIZE that is considered as being too high
+@UsedToMaxsizeSpaceThresholdRatio decimal(3,2) = 0.8,
+
+-- 1130: The ratio of allocated space to database MAXSIZE that is considered as being too high
+@AllocatedToMaxsizeSpaceThresholdRatio decimal(3,2) = 0.8,
+
+-- 1140: The ratio of used space to allocated space that is considered as being too low
+@UsedToAllocatedSpaceThresholdRatio decimal(3,2) = 0.3,
+
+-- 1140: Minimum database size to be considered
+@UsedToAllocatedSpaceDbMinSizeMB int = 10240,
+
+-- 1150: Minimum percentage of CPU RG delay to be considered as significant CPU throttling
+@CPUThrottlingDelayThresholdPercent decimal(5,2) = 20,
+
+-- 1170: The ratio of all index reads to index writes that is considered as being too low
+@IndexReadWriteThresholdRatio decimal(3,2) = 0.1,
+
+-- 1180: The maximum ratio of updates to all operations to define "infrequent updates"
+@CompressionPartitionUpdateRatioThreshold1 decimal(3,2) = 0.2,
+
+-- 1180: The maximum ratio of updates to all operations to define "more frequent but not frequent enough updates"
+@CompressionPartitionUpdateRatioThreshold2 decimal(3,2) = 0.5,
+
+-- 1180: The minimum ratio of scans to all operations to define "frequent enough scans"
+@CompressionPartitionScanRatioThreshold1 decimal(3,2) = 0.5,
+
+-- 1180: Maximum CPU usage percentage to be considered as sufficient CPU headroom
+@CompressionCPUHeadroomThreshold1 decimal(5,2) = 60,
+
+-- 1180: Minimum CPU usage percentage to be considered as insufficient CPU headroom
+@CompressionCPUHeadroomThreshold2 decimal(5,2) = 80,
+
+-- 1180: Minimum required number of resource stats sampling intervals
+@CompressionMinResourceStatSamples smallint = 30,
+
+-- 1190: Minimum log rate as percentage of SLO limit that is considered as being too high
+@HighLogRateThresholdPercent decimal(5,2) = 80,
+
+-- 1200: Minimum required per-db size of single-use plans to be considered as significant
+@SingleUsePlanSizeThresholdMB int = 512,
+
+-- 1200: The minimum ratio of single-use plans size to total plan size per database to be considered as significant
+@SingleUseTotalPlanSizeRatioThreshold decimal(3,2) = 0.3,
+
+-- 1210: The minimum user impact for a missing index to be considered as significant
+@MissingIndexAvgUserImpactThreshold decimal(5,2) = 80,
+
+-- 1220: The minimum size of redo queue on secondaries to be considered as significant
+@RedoQueueSizeThresholdMB int = 1024,
+
+-- 1230: The minimum ratio of governed IOPS issued to workload group IOPS limit that is considered significant
+@GroupIORGAtLimitThresholdRatio decimal(3,2) = 0.9,
+
+-- 1240: The minimum ratio of IO RG delay time to total IO stall time that is considered significant
+@GroupIORGImpactRatio decimal(3,2) = 0.8,
+
+-- 1250: The minimum ratio of governed IOPS issued to resource pool IOPS limit that is considered significant
+@PoolIORGAtLimitThresholdRatio decimal(3,2) = 0.9,
+
+-- 1260: The minimum ratio of IO RG delay time to total IO stall time that is considered significant
+@PoolIORGImpactRatio decimal(3,2) = 0.8,
+
+-- 1270: The minimum size of persistent version store (PVS) to be considered significant
+@PVSMinimumSizeThresholdGB int = 100,
+
+-- 1270: The minimum ratio of PVS size to database maxsize to be considered significant
+@PVSToMaxSizeMinThresholdRatio decimal(3,2) = 0.3,
+
+-- 1290: The minimum table size to be considered
+@CCICandidateMinSizeGB int = 10,
+
+-- 1300: The minimum geo-replication lag to be considered significant
+@HighGeoReplLagMinThresholdSeconds int = 10,
+
+-- 1300: The length of time window that defines recent geo-replicated transactions
+@RecentGeoReplTranTimeWindowLengthSeconds int = 300,
+
+-- 1310: The number of empty partitions at head end considered required
+@MinEmptyPartitionCount tinyint = 2,
+
+-- 1320: The number of top queries along each dimension (duration, CPU time, etc.) to consider
+@QueryStoreTopQueryCount tinyint = 2,
+
+-- 1330: The ratio of tempdb allocated data space to data MAXSIZE that is considered as being too high
+@TempdbDataAllocatedToMaxsizeThresholdRatio decimal(3,2) = 0.8,
+
+-- 1340: The ratio of tempdb used space to MAXSIZE that is considered as being too high
+@TempdbDataUsedToMaxsizeThresholdRatio decimal(3,2) = 0.8,
+
+-- 1350: The ratio of tempdb allocated log space to log MAXSIZE that is considered as being too high
+@TempdbLogAllocatedToMaxsizeThresholdRatio decimal(3,2) = 0.6
 ;
 
 DECLARE @TipDefinition table (
                              tip_id smallint NOT NULL PRIMARY KEY,
                              tip_name nvarchar(50) NOT NULL UNIQUE,
-                             confidence_percent decimal(3,0) NOT NULL,
+                             confidence_percent decimal(3,0) NOT NULL CHECK (confidence_percent BETWEEN 0 AND 100),
                              tip_url nvarchar(200) NOT NULL
                              );
 DECLARE @DetectedTip table (
@@ -78,8 +143,10 @@ DECLARE @DetectedTip table (
                            details nvarchar(max) NULL
                            );
 
+DECLARE @CRLF char(2) = CHAR(13) + CHAR(10);
+
 SET NOCOUNT ON;
-SET LOCK_TIMEOUT 5000; -- abort if a concurrent DDL operation holds a lock on metadata
+SET LOCK_TIMEOUT 5000; -- abort if another request holds a lock on metadata for too long
 
 BEGIN TRY
 
@@ -136,7 +203,7 @@ VALUES
 (1180, 'ROW or PAGE compression opportunities may exist',    65, 'https://aka.ms/sqldbtips#1180'),
 (1190, 'Log rate is close to limit',                         70, 'https://aka.ms/sqldbtips#1190'),
 (1200, 'Plan cache is bloated by single-use plans',          90, 'https://aka.ms/sqldbtips#1200'),
-(1210, 'Missing indexes',                                    70, 'https://aka.ms/sqldbtips#1210'),
+(1210, 'Missing indexes may be impacting performance',       70, 'https://aka.ms/sqldbtips#1210'),
 (1220, 'Redo queue is large',                                60, 'https://aka.ms/sqldbtips#1220'),
 (1230, 'Data IOPS are close to workload group limit',        70, 'https://aka.ms/sqldbtips#1230'),
 (1240, 'Workload group IO governance impact is significant', 40, 'https://aka.ms/sqldbtips#1240'),
@@ -147,7 +214,7 @@ VALUES
 (1290, 'Clustered columnstore candidates found',             50, 'https://aka.ms/sqldbtips#1290'),
 (1300, 'Geo-replication state may be unhealthy',             70, 'https://aka.ms/sqldbtips#1300'),
 (1310, 'Last partitions are not empty',                      80, 'https://aka.ms/sqldbtips#1310'),
-(1320, 'Top queries',                                        90, 'https://aka.ms/sqldbtips#1320'),
+(1320, 'Top queries should be investigated',                 90, 'https://aka.ms/sqldbtips#1320'),
 (1330, 'Tempdb data allocated size is close to MAXSIZE',     70, 'https://aka.ms/sqldbtips#1330'),
 (1340, 'Tempdb data used size is close to MAXSIZE',          95, 'https://aka.ms/sqldbtips#1340'),
 (1350, 'Tempdb log allocated size is close to MAXSIZE',      80, 'https://aka.ms/sqldbtips#1350')
@@ -157,8 +224,8 @@ VALUES
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1000 AS tip_id,
        CONCAT(
-             'MAXDOP for primary: ', CAST(value AS varchar(2)), CHAR(13), CHAR(10),
-             'MAXDOP for secondary: ', ISNULL(CAST(value_for_secondary AS varchar(4)), 'NULL'), CHAR(13), CHAR(10)
+             'MAXDOP for primary: ', CAST(value AS varchar(2)), @CRLF,
+             'MAXDOP for secondary: ', ISNULL(CAST(value_for_secondary AS varchar(4)), 'NULL'), @CRLF
              )
        AS details
 FROM sys.database_scoped_configurations
@@ -172,8 +239,8 @@ WHERE name = N'MAXDOP'
 UNION
 SELECT 1010 AS tip_id,
        CONCAT(
-             'MAXDOP for primary: ', CAST(value AS varchar(2)), CHAR(13), CHAR(10),
-             'MAXDOP for secondary: ', ISNULL(CAST(value_for_secondary AS varchar(4)), 'NULL'), CHAR(13), CHAR(10)
+             'MAXDOP for primary: ', CAST(value AS varchar(2)), @CRLF,
+             'MAXDOP for secondary: ', ISNULL(CAST(value_for_secondary AS varchar(4)), 'NULL'), @CRLF
              )
        AS details
 FROM sys.database_scoped_configurations
@@ -187,8 +254,8 @@ WHERE name = N'MAXDOP'
 UNION
 SELECT 1020 AS tip_id,
        CONCAT(
-             'MAXDOP for primary: ', CAST(value AS varchar(2)), CHAR(13), CHAR(10),
-             'MAXDOP for secondary: ', ISNULL(CAST(value_for_secondary AS varchar(4)), 'NULL'), CHAR(13), CHAR(10)
+             'MAXDOP for primary: ', CAST(value AS varchar(2)), @CRLF,
+             'MAXDOP for secondary: ', ISNULL(CAST(value_for_secondary AS varchar(4)), 'NULL'), @CRLF
              )
        AS details
 FROM sys.database_scoped_configurations
@@ -355,8 +422,7 @@ SELECT 1100 AS tip_id,
                             ', type: ', index_type,
                             ', object_id: ', CAST(object_id AS varchar(11)),
                             ', index_id: ', CAST(index_id AS varchar(11))
-                            ) AS nvarchar(max)), 
-                 CONCAT(CHAR(13), CHAR(10))
+                            ) AS nvarchar(max)), @CRLF
                  )
                  WITHIN GROUP (ORDER BY schema_name, object_name, index_type, index_name)
        AS details
@@ -549,8 +615,7 @@ SELECT STRING_AGG(
                             object_name, '.', 
                             index_name, 
                             ' (reads: ', FORMAT(user_seeks + user_scans + user_lookups, '#,0'), ' writes: ', FORMAT(user_updates, '#,0'), ')'
-                            ) AS nvarchar(max)), 
-                 CONCAT(CHAR(13), CHAR(10))
+                            ) AS nvarchar(max)), @CRLF
                  ) WITHIN GROUP (ORDER BY schema_name, object_name, index_name)
        AS details
 FROM index_usage
@@ -558,7 +623,7 @@ HAVING COUNT(1) > 1
 )
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1170 AS tip_id,
-       CONCAT('Since database engine startup at ', CONVERT(varchar(20), si.sqlserver_start_time, 120), ' UTC:', CHAR(13), CHAR(10), iua.details) AS details
+       CONCAT('Since database engine startup at ', CONVERT(varchar(20), si.sqlserver_start_time, 120), ' UTC:', @CRLF, iua.details) AS details
 FROM index_usage_agg AS iua
 CROSS JOIN sys.dm_os_sys_info AS si
 WHERE iua.details IS NOT NULL
@@ -713,8 +778,7 @@ SELECT STRING_AGG(
                             ', partition range size (MB): ', FORMAT(partition_range_size_mb, 'N'), 
                             ', present compression type: ', present_compression_type,
                             ', new compression type: ', new_compression_type
-                            ) AS nvarchar(max)),
-                 CONCAT(CHAR(13), CHAR(10))
+                            ) AS nvarchar(max)), @CRLF
                  )
                  WITHIN GROUP (ORDER BY object_id, index_name, partition_range, partition_range_size_mb, new_compression_type)
        AS details
@@ -723,7 +787,7 @@ HAVING COUNT(1) > 0
 )
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1180 AS tip_id,
-       CONCAT('Since database engine startup at ', CONVERT(varchar(20), si.sqlserver_start_time, 120), ' UTC:', CHAR(13), CHAR(10), ppga.details) AS details
+       CONCAT('Since database engine startup at ', CONVERT(varchar(20), si.sqlserver_start_time, 120), ' UTC:', @CRLF, ppga.details) AS details
 FROM packed_partition_group_agg AS ppga
 CROSS JOIN sys.dm_os_sys_info AS si
 WHERE ppga.details IS NOT NULL
@@ -794,7 +858,7 @@ WHERE cp.objtype IN ('Adhoc','Prepared')
       AND
       cp.cacheobjtype = 'Compiled Plan'
       AND
-      t.dbid BETWEEN 5 AND 30000 -- exclude system databases
+      t.dbid BETWEEN 5 AND 32700 -- exclude system databases
 GROUP BY t.dbid
 )
 INSERT INTO @DetectedTip (tip_id, details)
@@ -806,9 +870,8 @@ SELECT 1200 AS tip_id,
                             '), single use plans take ', FORMAT(single_use_db_plan_cache_size_mb, 'N'),
                             ' MB, or ', FORMAT(single_use_db_plan_cache_size_mb / total_db_plan_cache_size_mb, 'P'),
                             ' of total cached plans for this database.'
-                            ) AS nvarchar(max)),
-                 CONCAT(CHAR(13), CHAR(10))
-                 ) 
+                            ) AS nvarchar(max)), @CRLF
+                 )
                  WITHIN GROUP (ORDER BY database_name DESC, database_id)
        AS details
 FROM plan_cache_db_summary
@@ -832,8 +895,7 @@ SELECT STRING_AGG(
                             ', user seeks: ', FORMAT(gs.user_seeks, '#,0'),
                             ', user scans: ', FORMAT(gs.user_scans, '#,0'),
                             ', avg user impact: ', gs.avg_user_impact, '%.'
-                            ) AS nvarchar(max)),
-                 CONCAT(CHAR(13), CHAR(10))
+                            ) AS nvarchar(max)), @CRLF
                  ) 
                  WITHIN GROUP (ORDER BY avg_user_impact DESC, statement)
        AS details
@@ -847,7 +909,7 @@ HAVING COUNT(1) > 0
 )
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1210 AS tip_id,
-       CONCAT('Since database engine startup at ', CONVERT(varchar(20), si.sqlserver_start_time, 120), ' UTC:', CHAR(13), CHAR(10), mia.details) AS details
+       CONCAT('Since database engine startup at ', CONVERT(varchar(20), si.sqlserver_start_time, 120), ' UTC:', @CRLF, mia.details) AS details
 FROM missing_index_agg AS mia
 CROSS JOIN sys.dm_os_sys_info AS si
 WHERE mia.details IS NOT NULL
@@ -1040,20 +1102,20 @@ SELECT 1230 AS tip_id,
        CONCAT(
              'In the last ', recent_history_duration_minutes,
              ' minutes, there were ', count_io_rg_at_limit_intervals, 
-             ' time interval(s) when total data IO approached the workload group (database-level) IOPS limit of the service objective, ', FORMAT(primary_group_max_io, '#,0'), ' IOPS.', CHAR(13), CHAR(10),
-             'Across these intervals, aggregate IO statistics were: ', CHAR(13), CHAR(10),
-             'longest interval duration: ', FORMAT(longest_io_rg_at_limit_duration_seconds, '#,0'), ' seconds; ', CHAR(13), CHAR(10),
-             'total read IO time: ', FORMAT(total_read_time_ms, '#,0'), ' milliseconds; ', CHAR(13), CHAR(10),
-             'total throttled read IO time: ', FORMAT(total_read_throttled_time_ms, '#,0'), ' milliseconds; ', CHAR(13), CHAR(10),
-             'average read IOPS: ', FORMAT(avg_read_iops, '#,0'), '; ', CHAR(13), CHAR(10),
-             'maximum read IOPS: ', FORMAT(max_read_iops, '#,0'), '; ', CHAR(13), CHAR(10),
-             'average write IOPS: ', FORMAT(avg_write_iops, '#,0'), '; ', CHAR(13), CHAR(10),
-             'maximum write IOPS: ', FORMAT(max_write_iops, '#,0'), '; ', CHAR(13), CHAR(10),
-             'average background write IOPS: ', FORMAT(avg_background_write_iops, '#,0'), '; ', CHAR(13), CHAR(10),
-             'maximum background write IOPS: ', FORMAT(max_background_write_iops, '#,0'), '; ', CHAR(13), CHAR(10),
-             'average read IO throughput: ', FORMAT(avg_read_throughput_mbps, '#,0.00'), ' MBps; ', CHAR(13), CHAR(10),
-             'maximum read IO throughput: ', FORMAT(max_read_throughput_mbps, '#,0.00'), ' MBps; ', CHAR(13), CHAR(10),
-             'average background write IO throughput: ', FORMAT(avg_background_write_throughput_mbps, '#,0.00'), ' MBps; ', CHAR(13), CHAR(10),
+             ' time interval(s) when total data IO approached the workload group (database-level) IOPS limit of the service objective, ', FORMAT(primary_group_max_io, '#,0'), ' IOPS.', @CRLF,
+             'Across these intervals, aggregate IO statistics were: ', @CRLF,
+             'longest interval duration: ', FORMAT(longest_io_rg_at_limit_duration_seconds, '#,0'), ' seconds; ', @CRLF,
+             'total read IO time: ', FORMAT(total_read_time_ms, '#,0'), ' milliseconds; ', @CRLF,
+             'total throttled read IO time: ', FORMAT(total_read_throttled_time_ms, '#,0'), ' milliseconds; ', @CRLF,
+             'average read IOPS: ', FORMAT(avg_read_iops, '#,0'), '; ', @CRLF,
+             'maximum read IOPS: ', FORMAT(max_read_iops, '#,0'), '; ', @CRLF,
+             'average write IOPS: ', FORMAT(avg_write_iops, '#,0'), '; ', @CRLF,
+             'maximum write IOPS: ', FORMAT(max_write_iops, '#,0'), '; ', @CRLF,
+             'average background write IOPS: ', FORMAT(avg_background_write_iops, '#,0'), '; ', @CRLF,
+             'maximum background write IOPS: ', FORMAT(max_background_write_iops, '#,0'), '; ', @CRLF,
+             'average read IO throughput: ', FORMAT(avg_read_throughput_mbps, '#,0.00'), ' MBps; ', @CRLF,
+             'maximum read IO throughput: ', FORMAT(max_read_throughput_mbps, '#,0.00'), ' MBps; ', @CRLF,
+             'average background write IO throughput: ', FORMAT(avg_background_write_throughput_mbps, '#,0.00'), ' MBps; ', @CRLF,
              'maximum background write IO throughput: ', FORMAT(max_background_write_throughput_mbps, '#,0.00'), ' MBps.'
              )
        AS details
@@ -1064,20 +1126,20 @@ SELECT 1240 AS tip_id,
        CONCAT(
              'In the last ', recent_history_duration_minutes,
              ' minutes, there were ', count_io_rg_impact_intervals, 
-             ' time interval(s) when workload group (database-level) resource governance for the selected service objective was significantly delaying IO.', CHAR(13), CHAR(10),
-             'Across these intervals, aggregate IO statistics were: ', CHAR(13), CHAR(10),
-             'longest interval duration: ', FORMAT(longest_io_rg_impact_duration_seconds, '#,0'), ' seconds; ', CHAR(13), CHAR(10),
-             'total read IO time: ', FORMAT(total_read_time_ms, '#,0'), ' milliseconds; ', CHAR(13), CHAR(10),
-             'total throttled read IO time: ', FORMAT(total_read_throttled_time_ms, '#,0'), ' milliseconds; ', CHAR(13), CHAR(10),
-             'average read IOPS: ', FORMAT(avg_read_iops, '#,0'), '; ', CHAR(13), CHAR(10),
-             'maximum read IOPS: ', FORMAT(max_read_iops, '#,0'), '; ', CHAR(13), CHAR(10),
-             'average write IOPS: ', FORMAT(avg_write_iops, '#,0'), '; ', CHAR(13), CHAR(10),
-             'maximum write IOPS: ', FORMAT(max_write_iops, '#,0'), '; ', CHAR(13), CHAR(10),
-             'average background write IOPS: ', FORMAT(avg_background_write_iops, '#,0'), '; ', CHAR(13), CHAR(10),
-             'maximum background write IOPS: ', FORMAT(max_background_write_iops, '#,0'), '; ', CHAR(13), CHAR(10),
-             'average read IO throughput: ', FORMAT(avg_read_throughput_mbps, '#,0.00'), ' MBps; ', CHAR(13), CHAR(10),
-             'maximum read IO throughput: ', FORMAT(max_read_throughput_mbps, '#,0.00'), ' MBps; ', CHAR(13), CHAR(10),
-             'average background write IO throughput: ', FORMAT(avg_background_write_throughput_mbps, '#,0.00'), ' MBps; ', CHAR(13), CHAR(10),
+             ' time interval(s) when workload group (database-level) resource governance for the selected service objective was significantly delaying IO.', @CRLF,
+             'Across these intervals, aggregate IO statistics were: ', @CRLF,
+             'longest interval duration: ', FORMAT(longest_io_rg_impact_duration_seconds, '#,0'), ' seconds; ', @CRLF,
+             'total read IO time: ', FORMAT(total_read_time_ms, '#,0'), ' milliseconds; ', @CRLF,
+             'total throttled read IO time: ', FORMAT(total_read_throttled_time_ms, '#,0'), ' milliseconds; ', @CRLF,
+             'average read IOPS: ', FORMAT(avg_read_iops, '#,0'), '; ', @CRLF,
+             'maximum read IOPS: ', FORMAT(max_read_iops, '#,0'), '; ', @CRLF,
+             'average write IOPS: ', FORMAT(avg_write_iops, '#,0'), '; ', @CRLF,
+             'maximum write IOPS: ', FORMAT(max_write_iops, '#,0'), '; ', @CRLF,
+             'average background write IOPS: ', FORMAT(avg_background_write_iops, '#,0'), '; ', @CRLF,
+             'maximum background write IOPS: ', FORMAT(max_background_write_iops, '#,0'), '; ', @CRLF,
+             'average read IO throughput: ', FORMAT(avg_read_throughput_mbps, '#,0.00'), ' MBps; ', @CRLF,
+             'maximum read IO throughput: ', FORMAT(max_read_throughput_mbps, '#,0.00'), ' MBps; ', @CRLF,
+             'average background write IO throughput: ', FORMAT(avg_background_write_throughput_mbps, '#,0.00'), ' MBps; ', @CRLF,
              'maximum background write IO throughput: ', FORMAT(max_background_write_throughput_mbps, '#,0.00'), ' MBps.'
              )
        AS details
@@ -1233,16 +1295,16 @@ SELECT 1250 AS tip_id,
        CONCAT(
              'In the last ', l.recent_history_duration_minutes,
              ' minutes, there were ', l.count_io_rg_at_limit_intervals, 
-             ' time interval(s) when total data IO approached the resource pool IOPS limit of the service objective ', IIF(dso.service_objective = 'ElasticPool', CONCAT('for elastic pool ', QUOTENAME(dso.elastic_pool_name)), ''), ', ', FORMAT(l.pool_max_io, '#,0'), ' IOPS.', CHAR(13), CHAR(10),
-             'Across these intervals, aggregate IO statistics were: ', CHAR(13), CHAR(10),
-             'longest interval duration: ', FORMAT(l.longest_io_rg_at_limit_duration_seconds, '#,0'), ' seconds; ', CHAR(13), CHAR(10),
-             'total read IO time: ', FORMAT(l.total_read_time_ms, '#,0'), ' milliseconds; ', CHAR(13), CHAR(10),
-             'total throttled read IO time: ', FORMAT(l.total_read_throttled_time_ms, '#,0'), ' milliseconds; ', CHAR(13), CHAR(10),
-             'average read IOPS: ', FORMAT(l.avg_read_iops, '#,0'), '; ', CHAR(13), CHAR(10),
-             'maximum read IOPS: ', FORMAT(l.max_read_iops, '#,0'), '; ', CHAR(13), CHAR(10),
-             'average write IOPS: ', FORMAT(l.avg_write_iops, '#,0'), '; ', CHAR(13), CHAR(10),
-             'maximum write IOPS: ', FORMAT(l.max_write_iops, '#,0'), '; ', CHAR(13), CHAR(10),
-             'average read IO throughput: ', FORMAT(l.avg_read_throughput_mbps, '#,0.00'), ' MBps; ', CHAR(13), CHAR(10),
+             ' time interval(s) when total data IO approached the resource pool IOPS limit of the service objective ', IIF(dso.service_objective = 'ElasticPool', CONCAT('for elastic pool ', QUOTENAME(dso.elastic_pool_name)), ''), ', ', FORMAT(l.pool_max_io, '#,0'), ' IOPS.', @CRLF,
+             'Across these intervals, aggregate IO statistics were: ', @CRLF,
+             'longest interval duration: ', FORMAT(l.longest_io_rg_at_limit_duration_seconds, '#,0'), ' seconds; ', @CRLF,
+             'total read IO time: ', FORMAT(l.total_read_time_ms, '#,0'), ' milliseconds; ', @CRLF,
+             'total throttled read IO time: ', FORMAT(l.total_read_throttled_time_ms, '#,0'), ' milliseconds; ', @CRLF,
+             'average read IOPS: ', FORMAT(l.avg_read_iops, '#,0'), '; ', @CRLF,
+             'maximum read IOPS: ', FORMAT(l.max_read_iops, '#,0'), '; ', @CRLF,
+             'average write IOPS: ', FORMAT(l.avg_write_iops, '#,0'), '; ', @CRLF,
+             'maximum write IOPS: ', FORMAT(l.max_write_iops, '#,0'), '; ', @CRLF,
+             'average read IO throughput: ', FORMAT(l.avg_read_throughput_mbps, '#,0.00'), ' MBps; ', @CRLF,
              'maximum read IO throughput: ', FORMAT(l.max_read_throughput_mbps, '#,0.00'), ' MBps.'
              )
        AS details
@@ -1256,16 +1318,16 @@ SELECT 1260 AS tip_id,
        CONCAT(
              'In the last ', i.recent_history_duration_minutes,
              ' minutes, there were ', i.count_io_rg_impact_intervals, 
-             ' time interval(s) when resource pool resource governance for the selected service objective was significantly delaying IO', IIF(dso.service_objective = 'ElasticPool', CONCAT(' for elastic pool ', QUOTENAME(dso.elastic_pool_name)), ''), '.', CHAR(13), CHAR(10),
-             'Across these intervals, aggregate IO statistics were: ', CHAR(13), CHAR(10),
-             'longest interval duration: ', FORMAT(i.longest_io_rg_impact_duration_seconds, '#,0'), ' seconds; ', CHAR(13), CHAR(10),
-             'total read IO time: ', FORMAT(i.total_read_time_ms, '#,0'), ' milliseconds; ', CHAR(13), CHAR(10),
-             'total throttled read IO time: ', FORMAT(i.total_read_throttled_time_ms, '#,0'), ' milliseconds; ', CHAR(13), CHAR(10),
-             'average read IOPS: ', FORMAT(i.avg_read_iops, '#,0'), '; ', CHAR(13), CHAR(10),
-             'maximum read IOPS: ', FORMAT(i.max_read_iops, '#,0'), '; ', CHAR(13), CHAR(10),
-             'average write IOPS: ', FORMAT(i.avg_write_iops, '#,0'), '; ', CHAR(13), CHAR(10),
-             'maximum write IOPS: ', FORMAT(i.max_write_iops, '#,0'), '; ', CHAR(13), CHAR(10),
-             'average read IO throughput: ', FORMAT(i.avg_read_throughput_mbps, '#,0.00'), ' MBps; ', CHAR(13), CHAR(10),
+             ' time interval(s) when resource pool resource governance for the selected service objective was significantly delaying IO', IIF(dso.service_objective = 'ElasticPool', CONCAT(' for elastic pool ', QUOTENAME(dso.elastic_pool_name)), ''), '.', @CRLF,
+             'Across these intervals, aggregate IO statistics were: ', @CRLF,
+             'longest interval duration: ', FORMAT(i.longest_io_rg_impact_duration_seconds, '#,0'), ' seconds; ', @CRLF,
+             'total read IO time: ', FORMAT(i.total_read_time_ms, '#,0'), ' milliseconds; ', @CRLF,
+             'total throttled read IO time: ', FORMAT(i.total_read_throttled_time_ms, '#,0'), ' milliseconds; ', @CRLF,
+             'average read IOPS: ', FORMAT(i.avg_read_iops, '#,0'), '; ', @CRLF,
+             'maximum read IOPS: ', FORMAT(i.max_read_iops, '#,0'), '; ', @CRLF,
+             'average write IOPS: ', FORMAT(i.avg_write_iops, '#,0'), '; ', @CRLF,
+             'maximum write IOPS: ', FORMAT(i.max_write_iops, '#,0'), '; ', @CRLF,
+             'average read IO throughput: ', FORMAT(i.avg_read_throughput_mbps, '#,0.00'), ' MBps; ', @CRLF,
              'maximum read IO throughput: ', FORMAT(i.max_read_throughput_mbps, '#,0.00'), ' MBps.'
              )
        AS details
@@ -1319,13 +1381,13 @@ WHERE pvss.database_id = DB_ID()
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1270 AS tip_id,
        CONCAT(
-             'PVS size (GB): ', FORMAT(persistent_version_store_size_gb, 'N'), CHAR(13), CHAR(10),
-             'online index version store size (GB): ', FORMAT(online_index_version_store_size_gb, 'N'), CHAR(13), CHAR(10),
-             'current aborted transaction count: ', FORMAT(current_aborted_transaction_count, '#,0'), CHAR(13), CHAR(10),
-             'aborted transaction version cleaner start time: ', ISNULL(CONVERT(varchar(20), aborted_version_cleaner_start_time, 120), 'N/A'), CHAR(13), CHAR(10),
-             'aborted transaction version cleaner end time: ', ISNULL(CONVERT(varchar(20), aborted_version_cleaner_end_time, 120), 'N/A'), CHAR(13), CHAR(10),
-             'oldest transaction begin time: ',  ISNULL(CONVERT(varchar(30), oldest_transaction_begin_time, 121), 'N/A'), CHAR(13), CHAR(10),
-             'active transaction session_id: ', ISNULL(CAST(active_transaction_session_id AS varchar(11)), 'N/A'), CHAR(13), CHAR(10),
+             'PVS size (GB): ', FORMAT(persistent_version_store_size_gb, 'N'), @CRLF,
+             'online index version store size (GB): ', FORMAT(online_index_version_store_size_gb, 'N'), @CRLF,
+             'current aborted transaction count: ', FORMAT(current_aborted_transaction_count, '#,0'), @CRLF,
+             'aborted transaction version cleaner start time: ', ISNULL(CONVERT(varchar(20), aborted_version_cleaner_start_time, 120), 'N/A'), @CRLF,
+             'aborted transaction version cleaner end time: ', ISNULL(CONVERT(varchar(20), aborted_version_cleaner_end_time, 120), 'N/A'), @CRLF,
+             'oldest transaction begin time: ',  ISNULL(CONVERT(varchar(30), oldest_transaction_begin_time, 121), 'N/A'), @CRLF,
+             'active transaction session_id: ', ISNULL(CAST(active_transaction_session_id AS varchar(11)), 'N/A'), @CRLF,
              'active transaction elapsed time (seconds): ', ISNULL(CAST(active_transaction_elapsed_time_seconds AS varchar(11)), 'N/A')
              )
        AS details
@@ -1360,19 +1422,18 @@ INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1280 AS tip_id,
        STRING_AGG(
                  CAST(CONCAT(
-                            'schema name: ', QUOTENAME(schema_name) COLLATE DATABASE_DEFAULT, CHAR(13), CHAR(10),
-                            'object name: ', QUOTENAME(object_name) COLLATE DATABASE_DEFAULT, CHAR(13), CHAR(10),
-                            'index name: ', QUOTENAME(index_name) COLLATE DATABASE_DEFAULT, CHAR(13), CHAR(10),
+                            'schema name: ', QUOTENAME(schema_name) COLLATE DATABASE_DEFAULT, @CRLF,
+                            'object name: ', QUOTENAME(object_name) COLLATE DATABASE_DEFAULT, @CRLF,
+                            'index name: ', QUOTENAME(index_name) COLLATE DATABASE_DEFAULT, @CRLF,
                             'index type: ' + index_type COLLATE DATABASE_DEFAULT + CHAR(13) + CHAR(10),
-                            'percent complete: ', FORMAT(percent_complete, '#,0.00'), '%', CHAR(13), CHAR(10),
-                            'start time: ', CONVERT(varchar(20), start_time, 120), CHAR(13), CHAR(10),
-                            'last pause time: ', CONVERT(varchar(20), last_pause_time, 120), CHAR(13), CHAR(10),
-                            'total execution time (minutes): ', FORMAT(total_execution_time_minutes, '#,0'), CHAR(13), CHAR(10),
-                            'space allocated by resumable index operation (MB): ', FORMAT(index_operation_allocated_space_mb, '#,0.00'), CHAR(13), CHAR(10),
+                            'percent complete: ', FORMAT(percent_complete, '#,0.00'), '%', @CRLF,
+                            'start time: ', CONVERT(varchar(20), start_time, 120), @CRLF,
+                            'last pause time: ', CONVERT(varchar(20), last_pause_time, 120), @CRLF,
+                            'total execution time (minutes): ', FORMAT(total_execution_time_minutes, '#,0'), @CRLF,
+                            'space allocated by resumable index operation (MB): ', FORMAT(index_operation_allocated_space_mb, '#,0.00'), @CRLF,
                             'time remaining to auto-abort (minutes): ' + FORMAT(time_to_auto_abort_minutes, '#,0') + CHAR(13) + CHAR(10),
-                            'index operation SQL statement: ', sql_text COLLATE DATABASE_DEFAULT, CHAR(13), CHAR(10)
-                            ) AS nvarchar(max)),
-                 CONCAT(CHAR(13), CHAR(10))
+                            'index operation SQL statement: ', sql_text COLLATE DATABASE_DEFAULT, @CRLF
+                            ) AS nvarchar(max)), @CRLF
                  )
                  WITHIN GROUP (ORDER BY schema_name, object_name, index_name)
 FROM resumable_index_op 
@@ -1499,8 +1560,7 @@ SELECT STRING_AGG(
                             'seeks: ', FORMAT(seek_count, '#,0'), ', ',
                             'full scans: ', FORMAT(full_scan_count, '#,0'), ', ',
                             'lookups: ', FORMAT(lookup_count, '#,0')
-                            ) AS nvarchar(max)),
-                 CONCAT(CHAR(13), CHAR(10))
+                            ) AS nvarchar(max)), @CRLF
                  )
                  WITHIN GROUP (ORDER BY schema_name, table_name)
        AS details
@@ -1508,7 +1568,7 @@ FROM cci_candidate_table
 )
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1290 AS tip_id,
-       CONCAT('Since database engine startup at ', CONVERT(varchar(20), si.sqlserver_start_time, 120), ' UTC:', CHAR(13), CHAR(10), ccd.details) AS details
+       CONCAT('Since database engine startup at ', CONVERT(varchar(20), si.sqlserver_start_time, 120), ' UTC:', @CRLF, ccd.details) AS details
 FROM cci_candidate_details AS ccd
 CROSS JOIN sys.dm_os_sys_info AS si
 WHERE ccd.details IS NOT NULL
@@ -1529,8 +1589,7 @@ SELECT STRING_AGG(
                             'last replication time: ' + CAST(last_replication AS varchar(40)) + ', ',
                             'geo-replication lag (seconds): ' + FORMAT(replication_lag_sec, '#,0') + ', ',
                             'geo-replication state: ' + replication_state_desc
-                            ) AS nvarchar(max)),
-                 CONCAT(CHAR(13), CHAR(10))
+                            ) AS nvarchar(max)), @CRLF
                  )
                  WITHIN GROUP (ORDER BY partner_server, partner_database)
        AS details
@@ -1596,8 +1655,7 @@ SELECT 1310 AS tip_id,
                             'partition number: ', FORMAT(partition_number, '#,0'), ', ',
                             'partition rows: ', FORMAT(partition_rows, '#,0'), ', ',
                             'partition size (MB): ', FORMAT(partition_size_mb, '#,0.00'), ', '
-                            ) AS nvarchar(max)), 
-                 CONCAT(CHAR(13), CHAR(10))
+                            ) AS nvarchar(max)), @CRLF
                  )
                  WITHIN GROUP (ORDER BY schema_name, object_name, partition_number)
        AS details
@@ -1668,7 +1726,7 @@ SELECT query_hash,
 FROM query_wait_stats_ratio
 GROUP BY query_hash
 )
-INSERT INTO #query_wait_stats_summary (query_hash, ranked_wait_categories) -- persist into temp table for perf reasons
+INSERT INTO #query_wait_stats_summary (query_hash, ranked_wait_categories) -- persist into a temp table for perf reasons
 SELECT query_hash, ranked_wait_categories
 FROM query_wait_stats_summary
 OPTION (RECOMPILE);
@@ -1823,8 +1881,7 @@ SELECT 1320 AS tip_id,
                             ', plan_id: ', IIF(plan_id IS NOT NULL, CAST(plan_id AS varchar(11)), CONCAT('multiple (', CAST(count_plans AS varchar(11)), ')')),
                             ', executions: (regular: ', CAST(count_regular_executions AS varchar(11)), ', aborted: ', CAST(count_aborted_executions AS varchar(11)), ', exception: ', CAST(count_exception_executions AS varchar(11)), ')',
                             ', ranked waits: ', ISNULL(ranked_wait_categories, 'N/A')
-                            ) AS nvarchar(max)), 
-                 CONCAT(CHAR(13), CHAR(10))
+                            ) AS nvarchar(max)), @CRLF
                  )
                  WITHIN GROUP (ORDER BY duration_rank)
        AS details
@@ -1916,15 +1973,14 @@ IF @JSONOutput = 0
     LEFT JOIN @DetectedTip AS dt
     ON dt.tip_id = td.tip_id
     OUTER APPLY (
-                SELECT dt.details AS [processing-instruction(details)]
+                SELECT dt.details AS [processing-instruction(_)]
                 WHERE dt.details IS NOT NULL
                 FOR XML PATH (''), TYPE
                 ) d (details)
     WHERE dt.tip_id IS NOT NULL
           OR
           @ReturnAllTips = 1
-    ORDER BY confidence_percent DESC
-    ;
+    ORDER BY confidence_percent DESC;
 ELSE IF @JSONOutput = 1
     WITH tips AS -- flatten for JSON output
     (
@@ -1943,8 +1999,7 @@ ELSE IF @JSONOutput = 1
     SELECT *
     FROM tips
     ORDER BY confidence_percent DESC
-    FOR JSON AUTO
-    ;
+    FOR JSON AUTO;
 
 END TRY
 BEGIN CATCH
