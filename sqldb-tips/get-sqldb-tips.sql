@@ -2,7 +2,7 @@
 Returns a set of tips to improve database design, health, and performance in Azure SQL Database.
 For a detailed description and the latest version of the script, see https://aka.ms/sqldbtips
 
-v20201227.1
+v20201229.1
 */
 
 -- Set to 1 to output tips as a JSON value
@@ -134,7 +134,7 @@ DECLARE
 
 DECLARE @TipDefinition table (
                              tip_id smallint NOT NULL PRIMARY KEY,
-                             tip_name nvarchar(50) NOT NULL UNIQUE,
+                             tip_name nvarchar(60) NOT NULL UNIQUE,
                              confidence_percent decimal(3,0) NOT NULL CHECK (confidence_percent BETWEEN 0 AND 100),
                              tip_url nvarchar(200) NOT NULL
                              );
@@ -180,44 +180,44 @@ IF DB_NAME() = 'master' AND @EngineEdition = 5
 -- Define all tips
 INSERT INTO @TipDefinition (tip_id, tip_name, confidence_percent, tip_url)
 VALUES
-(1000, 'Excessive MAXDOP on all replicas',                   90, 'https://aka.ms/sqldbtips#1000'),
-(1010, 'Excessive MAXDOP on primary',                        90, 'https://aka.ms/sqldbtips#1010'),
-(1020, 'Excessive MAXDOP on secondaries',                    90, 'https://aka.ms/sqldbtips#1020'),
-(1030, 'Database compatibility level is older',              70, 'https://aka.ms/sqldbtips#1030'),
-(1040, 'Auto-create stats is disabled',                      95, 'https://aka.ms/sqldbtips#1040'),
-(1050, 'Auto-update stats is disabled',                      95, 'https://aka.ms/sqldbtips#1050'),
-(1060, 'RCSI is disabled',                                   80, 'https://aka.ms/sqldbtips#1060'),
-(1070, 'Query Store is disabled',                            90, 'https://aka.ms/sqldbtips#1070'),
-(1071, 'Query Store is read-only',                           90, 'https://aka.ms/sqldbtips#1071'),
-(1072, 'Query Store capture mode is NONE',                   90, 'https://aka.ms/sqldbtips#1072'),
-(1080, 'AUTO_SHRINK is enabled',                             99, 'https://aka.ms/sqldbtips#1080'),
-(1100, 'Btree indexes have GUID leading columns',            60, 'https://aka.ms/sqldbtips#1100'),
-(1110, 'FLGP auto-tuning is disabled',                       95, 'https://aka.ms/sqldbtips#1110'),
-(1120, 'Used space is close to MAXSIZE',                     80, 'https://aka.ms/sqldbtips#1120'),
-(1130, 'Allocated space is close to MAXSIZE',                60, 'https://aka.ms/sqldbtips#1130'),
-(1140, 'Allocated space is much larger than used space',     50, 'https://aka.ms/sqldbtips#1140'),
-(1150, 'Recent CPU throttling found',                        90, 'https://aka.ms/sqldbtips#1150'),
-(1160, 'Recent out of memory errors found',                  80, 'https://aka.ms/sqldbtips#1160'),
-(1165, 'Recent memory grant waits and timeouts found',       70, 'https://aka.ms/sqldbtips#1165'),
-(1170, 'Nonclustered indexes with low reads found',          60, 'https://aka.ms/sqldbtips#1170'),
-(1180, 'ROW or PAGE compression opportunities may exist',    65, 'https://aka.ms/sqldbtips#1180'),
-(1190, 'Log rate is close to limit',                         70, 'https://aka.ms/sqldbtips#1190'),
-(1200, 'Plan cache is bloated by single-use plans',          90, 'https://aka.ms/sqldbtips#1200'),
-(1210, 'Missing indexes may be impacting performance',       70, 'https://aka.ms/sqldbtips#1210'),
-(1220, 'Redo queue is large',                                60, 'https://aka.ms/sqldbtips#1220'),
-(1230, 'Data IOPS are close to workload group limit',        70, 'https://aka.ms/sqldbtips#1230'),
-(1240, 'Workload group IO governance impact is significant', 40, 'https://aka.ms/sqldbtips#1240'),
-(1250, 'Data IOPS are close to resource pool limit',         70, 'https://aka.ms/sqldbtips#1250'),
-(1260, 'Resouce pool IO governance impact is significant',   40, 'https://aka.ms/sqldbtips#1260'),
-(1270, 'Persistent Version Store size is large',             70, 'https://aka.ms/sqldbtips#1270'),
-(1280, 'Paused resumable index operations found',            90, 'https://aka.ms/sqldbtips#1280'),
-(1290, 'Clustered columnstore candidates found',             50, 'https://aka.ms/sqldbtips#1290'),
-(1300, 'Geo-replication state may be unhealthy',             70, 'https://aka.ms/sqldbtips#1300'),
-(1310, 'Last partitions are not empty',                      80, 'https://aka.ms/sqldbtips#1310'),
-(1320, 'Top queries should be investigated',                 90, 'https://aka.ms/sqldbtips#1320'),
-(1330, 'Tempdb data allocated size is close to MAXSIZE',     70, 'https://aka.ms/sqldbtips#1330'),
-(1340, 'Tempdb data used size is close to MAXSIZE',          95, 'https://aka.ms/sqldbtips#1340'),
-(1350, 'Tempdb log allocated size is close to MAXSIZE',      80, 'https://aka.ms/sqldbtips#1350')
+(1000, 'Reduce MAXDOP on all replicas',                         90, 'https://aka.ms/sqldbtips#1000'),
+(1010, 'Reduce MAXDOP on primary',                              90, 'https://aka.ms/sqldbtips#1010'),
+(1020, 'Reduce MAXDOP on secondaries',                          90, 'https://aka.ms/sqldbtips#1020'),
+(1030, 'Use the latest database compatibility level',           70, 'https://aka.ms/sqldbtips#1030'),
+(1040, 'Enable auto-create statistics',                         95, 'https://aka.ms/sqldbtips#1040'),
+(1050, 'Enable auto-update statistics',                         95, 'https://aka.ms/sqldbtips#1050'),
+(1060, 'Enable RCSI',                                           80, 'https://aka.ms/sqldbtips#1060'),
+(1070, 'Enable Query Store',                                    90, 'https://aka.ms/sqldbtips#1070'),
+(1071, 'Change Query Store operation mode to read-write',       90, 'https://aka.ms/sqldbtips#1071'),
+(1072, 'Change Query Store capture mode from NONE to AUTO/ALL', 90, 'https://aka.ms/sqldbtips#1072'),
+(1080, 'Disable AUTO_SHRINK',                                   99, 'https://aka.ms/sqldbtips#1080'),
+(1100, 'Avoid GUID leading columns in btree indexes',           60, 'https://aka.ms/sqldbtips#1100'),
+(1110, 'Enable FLGP auto-tuning',                               95, 'https://aka.ms/sqldbtips#1110'),
+(1120, 'Used space is close to MAXSIZE',                        80, 'https://aka.ms/sqldbtips#1120'),
+(1130, 'Allocated space is close to MAXSIZE',                   60, 'https://aka.ms/sqldbtips#1130'),
+(1140, 'Allocated space is much larger than used space',        50, 'https://aka.ms/sqldbtips#1140'),
+(1150, 'Recent CPU throttling found',                           90, 'https://aka.ms/sqldbtips#1150'),
+(1160, 'Recent out of memory errors found',                     80, 'https://aka.ms/sqldbtips#1160'),
+(1165, 'Recent memory grant waits and timeouts found',          70, 'https://aka.ms/sqldbtips#1165'),
+(1170, 'Nonclustered indexes with low reads found',             60, 'https://aka.ms/sqldbtips#1170'),
+(1180, 'ROW or PAGE compression opportunities may exist',       65, 'https://aka.ms/sqldbtips#1180'),
+(1190, 'Transaction log IO is close to limit',                  70, 'https://aka.ms/sqldbtips#1190'),
+(1200, 'Plan cache is bloated by single-use plans',             90, 'https://aka.ms/sqldbtips#1200'),
+(1210, 'Missing indexes may be impacting performance',          70, 'https://aka.ms/sqldbtips#1210'),
+(1220, 'Redo queue or a secondary replica is large',            60, 'https://aka.ms/sqldbtips#1220'),
+(1230, 'Data IOPS are close to workload group limit',           70, 'https://aka.ms/sqldbtips#1230'),
+(1240, 'Workload group IO governance impact is significant',    40, 'https://aka.ms/sqldbtips#1240'),
+(1250, 'Data IOPS are close to resource pool limit',            70, 'https://aka.ms/sqldbtips#1250'),
+(1260, 'Resouce pool IO governance impact is significant',      40, 'https://aka.ms/sqldbtips#1260'),
+(1270, 'Persistent Version Store size is large',                70, 'https://aka.ms/sqldbtips#1270'),
+(1280, 'Paused resumable index operations found',               90, 'https://aka.ms/sqldbtips#1280'),
+(1290, 'Clustered columnstore candidates found',                50, 'https://aka.ms/sqldbtips#1290'),
+(1300, 'Geo-replication state may be unhealthy',                70, 'https://aka.ms/sqldbtips#1300'),
+(1310, 'Last partitions are not empty',                         80, 'https://aka.ms/sqldbtips#1310'),
+(1320, 'Top queries should be investigated and tuned',          90, 'https://aka.ms/sqldbtips#1320'),
+(1330, 'Tempdb data allocated size is close to MAXSIZE',        70, 'https://aka.ms/sqldbtips#1330'),
+(1340, 'Tempdb data used size is close to MAXSIZE',             95, 'https://aka.ms/sqldbtips#1340'),
+(1350, 'Tempdb log allocated size is close to MAXSIZE',         80, 'https://aka.ms/sqldbtips#1350')
 ;
 
 -- MAXDOP
@@ -1965,9 +1965,9 @@ WHERE (file_type = 'ROWS' AND space_type = 'allocated' AND allocated_size_mb / N
 
 IF @JSONOutput = 0
     SELECT td.tip_id,
-           td.tip_name,
+           td.tip_name AS description,
            td.confidence_percent,
-           td.tip_url,
+           td.tip_url AS URL,
            d.details
     FROM @TipDefinition AS td
     LEFT JOIN @DetectedTip AS dt
@@ -1985,9 +1985,9 @@ ELSE IF @JSONOutput = 1
     WITH tips AS -- flatten for JSON output
     (
     SELECT td.tip_id,
-           td.tip_name,
+           td.tip_name AS description,
            td.confidence_percent,
-           td.tip_url,
+           td.tip_url AS URL,
            dt.details
     FROM @TipDefinition AS td
     LEFT JOIN @DetectedTip AS dt
