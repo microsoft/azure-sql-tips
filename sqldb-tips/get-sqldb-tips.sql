@@ -2,7 +2,7 @@
 Returns a set of tips to improve database design, health, and performance in Azure SQL Database.
 For a detailed description and the latest version of the script, see https://aka.ms/sqldbtips
 
-v20201229.1
+v20201230.1
 */
 
 -- Set to 1 to output tips as a JSON value
@@ -129,7 +129,13 @@ DECLARE
 @TempdbDataUsedToMaxsizeThresholdRatio decimal(3,2) = 0.8,
 
 -- 1350: The ratio of tempdb allocated log space to log MAXSIZE that is considered as being too high
-@TempdbLogAllocatedToMaxsizeThresholdRatio decimal(3,2) = 0.6
+@TempdbLogAllocatedToMaxsizeThresholdRatio decimal(3,2) = 0.6,
+
+-- 1360: The minimum ratio of workload group workers used to maximum workers per workload group considered as being too high
+@HighGroupWorkerUtilizationThresholdRatio decimal(3,2) = 0.8,
+
+-- 1370: The minimum ratio of resource pool workers used to maximum workers per resource pool considered as being too high
+@HighPoolWorkerUtilizationThresholdRatio decimal(3,2) = 0.7
 ;
 
 DECLARE @TipDefinition table (
@@ -217,7 +223,9 @@ VALUES
 (1320, 'Top queries should be investigated and tuned',          90, 'https://aka.ms/sqldbtips#1320'),
 (1330, 'Tempdb data allocated size is close to MAXSIZE',        70, 'https://aka.ms/sqldbtips#1330'),
 (1340, 'Tempdb data used size is close to MAXSIZE',             95, 'https://aka.ms/sqldbtips#1340'),
-(1350, 'Tempdb log allocated size is close to MAXSIZE',         80, 'https://aka.ms/sqldbtips#1350')
+(1350, 'Tempdb log allocated size is close to MAXSIZE',         80, 'https://aka.ms/sqldbtips#1350'),
+(1360, 'Worker utilization is close to workload group limit',   80, 'https://aka.ms/sqldbtips#1360'),
+(1370, 'Worker utilization is close to resource pool limit',    80, 'https://aka.ms/sqldbtips#1370')
 ;
 
 -- MAXDOP
@@ -1751,7 +1759,8 @@ SELECT q.query_hash,
        SUM(rs.avg_logical_io_reads * rs.count_executions) AS total_logical_io_reads,
        SUM(rs.avg_query_max_used_memory * rs.count_executions) AS total_query_max_used_memory,
        SUM(rs.avg_log_bytes_used * rs.count_executions) AS total_log_bytes_used,
-       SUM(rs.avg_tempdb_space_used * rs.count_executions) AS total_tempdb_space_used
+       SUM(rs.avg_tempdb_space_used * rs.count_executions) AS total_tempdb_space_used,
+       SUM(rs.avg_dop * rs.count_executions) AS total_dop
 FROM sys.query_store_query AS q
 INNER JOIN sys.query_store_plan AS p
 ON q.query_id = p.query_id
@@ -1786,6 +1795,7 @@ SELECT rs.query_hash,
        ROW_NUMBER() OVER (ORDER BY rs.total_query_max_used_memory DESC) AS total_query_max_used_memory_rank,
        ROW_NUMBER() OVER (ORDER BY rs.total_log_bytes_used DESC) AS total_log_bytes_used_rank,
        ROW_NUMBER() OVER (ORDER BY rs.total_tempdb_space_used DESC) AS total_tempdb_space_used_rank,
+       ROW_NUMBER() OVER (ORDER BY rs.total_dop DESC) AS total_dop_rank,
        -- if total_cpu_time for a query is 2 times less than for the immediately higher query in the rank order, do not consider it a top query
        -- top_cpu_cutoff_indicator = 0 signifies a top query; the query where top_cpu_cutoff_indicator is 1 and any query with lower rank will be filtered out
        IIF(rs.total_cpu_time * 1. / NULLIF(LEAD(rs.total_cpu_time) OVER (ORDER BY rs.total_cpu_time), 0) < 0.5, 1, 0) AS top_cpu_cutoff_indicator,
@@ -1795,6 +1805,7 @@ SELECT rs.query_hash,
        IIF(rs.total_query_max_used_memory * 1. / NULLIF(LEAD(rs.total_query_max_used_memory) OVER (ORDER BY rs.total_query_max_used_memory), 0) < 0.5, 1, 0) AS top_memory_cutoff_indicator,
        IIF(rs.total_log_bytes_used * 1. / NULLIF(LEAD(rs.total_log_bytes_used) OVER (ORDER BY rs.total_log_bytes_used), 0) < 0.5, 1, 0) AS top_log_bytes_cutoff_indicator,
        IIF(rs.total_tempdb_space_used * 1. / NULLIF(LEAD(rs.total_tempdb_space_used) OVER (ORDER BY rs.total_tempdb_space_used), 0) < 0.5, 1, 0) AS top_tempdb_cutoff_indicator,
+       IIF(rs.total_dop * 1. / NULLIF(LEAD(rs.total_dop) OVER (ORDER BY rs.total_dop), 0) < 0.5, 1, 0) AS top_dop_cutoff_indicator,
        ws.ranked_wait_categories
 FROM query_runtime_stats AS rs
 LEFT JOIN #query_wait_stats_summary AS ws -- outer join in case wait stats collection is not enabled or waits are not available otherwise
@@ -1810,7 +1821,8 @@ SELECT *,
        SUM(top_executions_cutoff_indicator) OVER (ORDER BY executions_rank ROWS UNBOUNDED PRECEDING) AS top_executions_indicator,
        SUM(top_memory_cutoff_indicator) OVER (ORDER BY total_query_max_used_memory_rank ROWS UNBOUNDED PRECEDING) AS top_memory_indicator,
        SUM(top_log_bytes_cutoff_indicator) OVER (ORDER BY total_log_bytes_used_rank ROWS UNBOUNDED PRECEDING) AS top_log_bytes_indicator,
-       SUM(top_tempdb_cutoff_indicator) OVER (ORDER BY total_tempdb_space_used_rank ROWS UNBOUNDED PRECEDING) AS top_tempdb_indicator
+       SUM(top_tempdb_cutoff_indicator) OVER (ORDER BY total_tempdb_space_used_rank ROWS UNBOUNDED PRECEDING) AS top_tempdb_indicator,
+       SUM(top_dop_cutoff_indicator) OVER (ORDER BY total_dop_rank ROWS UNBOUNDED PRECEDING) AS top_dop_indicator
 FROM query_rank
 ),
 -- restrict to a union of queries that are top queries on some dimension; then, restrict further to top-within-top N queries along any dimension
@@ -1831,6 +1843,7 @@ SELECT query_hash,
        total_query_max_used_memory_rank,
        total_log_bytes_used_rank,
        total_tempdb_space_used_rank,
+       total_dop_rank,
        ranked_wait_categories
 FROM top_query_rank
 WHERE (
@@ -1847,6 +1860,8 @@ WHERE (
       top_log_bytes_indicator = 0
       OR
       top_tempdb_indicator = 0
+      OR
+      top_dop_indicator = 0
       )
       AND
       (
@@ -1863,6 +1878,8 @@ WHERE (
       total_log_bytes_used_rank <= @QueryStoreTopQueryCount
       OR
       total_tempdb_space_used_rank <= @QueryStoreTopQueryCount
+      OR
+      total_dop_rank <= @QueryStoreTopQueryCount
       )
 )
 INSERT INTO @DetectedTip (tip_id, details)
@@ -1876,7 +1893,8 @@ SELECT 1320 AS tip_id,
                             ', logical IO reads: ', CAST(logical_io_reads_rank AS varchar(11)),
                             ', max used memory: ', CAST(total_query_max_used_memory_rank AS varchar(11)),
                             ', log bytes used: ', CAST(total_log_bytes_used_rank AS varchar(11)),
-                            ', tempdb used: ', CAST(total_tempdb_space_used_rank AS varchar(11)), ')',
+                            ', tempdb used: ', CAST(total_tempdb_space_used_rank AS varchar(11)),
+                            ', parallelism: ', CAST(total_dop_rank AS varchar(11)), ')',
                             ', query_id: ', IIF(query_id IS NOT NULL, CAST(query_id AS varchar(11)), CONCAT('multiple (', CAST(count_queries AS varchar(11)), ')')),
                             ', plan_id: ', IIF(plan_id IS NOT NULL, CAST(plan_id AS varchar(11)), CONCAT('multiple (', CAST(count_plans AS varchar(11)), ')')),
                             ', executions: (regular: ', CAST(count_regular_executions AS varchar(11)), ', aborted: ', CAST(count_aborted_executions AS varchar(11)), ', exception: ', CAST(count_exception_executions AS varchar(11)), ')',
@@ -1959,6 +1977,143 @@ WHERE (file_type = 'ROWS' AND space_type = 'allocated' AND allocated_size_mb / N
       (file_type = 'ROWS' AND space_type = 'used' AND used_size_mb / NULLIF(max_size_mb, 0) > @TempdbDataUsedToMaxsizeThresholdRatio)
       OR
       (file_type = 'LOG'  AND space_type = 'allocated' AND allocated_size_mb / NULLIF(max_size_mb, 0) > @TempdbLogAllocatedToMaxsizeThresholdRatio)
+;
+
+-- Workload group workers close to limit
+WITH
+worker_snapshot AS
+(
+SELECT snapshot_time,
+       duration_ms,
+       active_worker_count,
+       max_worker,
+       IIF(active_worker_count * 1. / NULLIF(max_worker, 0) > @HighGroupWorkerUtilizationThresholdRatio, 1, 0) AS high_worker_utilization_indicator
+FROM sys.dm_resource_governor_workload_groups_history_ex
+WHERE @EngineEdition = 5
+      AND
+      name like 'UserPrimaryGroup.DB%'
+      AND
+      TRY_CAST(RIGHT(name, LEN(name) - LEN('UserPrimaryGroup.DB') - 2) AS int) = DB_ID()
+),
+pre_packed_worker_snapshot AS
+(
+SELECT SUM(duration_ms) OVER (ORDER BY (SELECT 'no order')) / 60000 AS recent_history_duration_minutes,
+       snapshot_time,
+       active_worker_count,
+       max_worker,
+       high_worker_utilization_indicator,
+       ROW_NUMBER() OVER (ORDER BY snapshot_time) -- row number across all readings, in increasing chronological order
+       -
+       SUM(high_worker_utilization_indicator) OVER (ORDER BY snapshot_time ROWS UNBOUNDED PRECEDING) -- running count of all intervals where worker utilization exceeded the threshold
+       AS grouping_helper -- this difference remains constant while worker utilization is above the threshold, and can be used to collapse/pack an interval using aggregation
+FROM worker_snapshot
+),
+packed_worker_snapshot AS
+(
+SELECT MIN(snapshot_time) AS min_snapshot_time,
+       MAX(snapshot_time) AS max_snapshot_time,
+       AVG(active_worker_count) AS avg_worker_count,
+       MAX(active_worker_count) AS max_worker_count,
+       MIN(max_worker) AS worker_limit,
+       MIN(recent_history_duration_minutes) AS recent_history_duration_minutes
+FROM pre_packed_worker_snapshot
+WHERE high_worker_utilization_indicator = 1
+GROUP BY grouping_helper
+),
+worker_top_stat AS
+(
+SELECT MIN(recent_history_duration_minutes) AS recent_history_duration_minutes,
+       MIN(worker_limit) AS worker_limit,
+       MAX(DATEDIFF(second, min_snapshot_time, max_snapshot_time)) AS longest_high_worker_duration_seconds,
+       AVG(avg_worker_count) AS avg_worker_count,
+       MAX(max_worker_count) AS max_worker_count,
+       COUNT(1) AS count_high_worker_intervals
+FROM packed_worker_snapshot 
+)
+INSERT INTO @DetectedTip (tip_id, details)
+SELECT 1360 AS tip_id,
+       CONCAT(
+             'In the last ', recent_history_duration_minutes,
+             ' minutes, there were ', count_high_worker_intervals, 
+             ' interval(s) with worker utilization staying above ', FORMAT(@HighGroupWorkerUtilizationThresholdRatio, 'P'), 
+             ' of the workload group worker limit of ', FORMAT(worker_limit, '#,0'),
+             ' workers. The longest such interval lasted ', FORMAT(longest_high_worker_duration_seconds, '#,0'),
+             ' seconds. Across all such intervals, the average number of workers used was ', FORMAT(avg_worker_count, '#,0.00'),
+             ' and the maximum number of workers used was ', FORMAT(max_worker_count, '#,0'),
+             '.'
+             ) AS details
+FROM worker_top_stat 
+WHERE count_high_worker_intervals > 0
+;
+
+-- Resource pool workers close to limit
+WITH
+worker_snapshot AS
+(
+SELECT snapshot_time,
+       duration_ms,
+       active_worker_count,
+       active_worker_count * 100. / max_worker_percent AS max_worker,
+       IIF(max_worker_percent > @HighPoolWorkerUtilizationThresholdRatio * 100., 1, 0) AS high_worker_utilization_indicator
+FROM sys.dm_resource_governor_resource_pools_history_ex
+WHERE @EngineEdition = 5
+      AND
+      -- Consider user resource pool only
+      (
+      name LIKE 'SloSharedPool%'
+      OR
+      name LIKE 'UserPool%'
+      )
+),
+pre_packed_worker_snapshot AS
+(
+SELECT SUM(duration_ms) OVER (ORDER BY (SELECT 'no order')) / 60000 AS recent_history_duration_minutes,
+       snapshot_time,
+       active_worker_count,
+       max_worker,
+       high_worker_utilization_indicator,
+       ROW_NUMBER() OVER (ORDER BY snapshot_time) -- row number across all readings, in increasing chronological order
+       -
+       SUM(high_worker_utilization_indicator) OVER (ORDER BY snapshot_time ROWS UNBOUNDED PRECEDING) -- running count of all intervals where worker utilization exceeded the threshold
+       AS grouping_helper -- this difference remains constant while worker utilization is above the threshold, and can be used to collapse/pack an interval using aggregation
+FROM worker_snapshot
+),
+packed_worker_snapshot AS
+(
+SELECT MIN(snapshot_time) AS min_snapshot_time,
+       MAX(snapshot_time) AS max_snapshot_time,
+       AVG(active_worker_count) AS avg_worker_count,
+       MAX(active_worker_count) AS max_worker_count,
+       MIN(max_worker) AS worker_limit,
+       MIN(recent_history_duration_minutes) AS recent_history_duration_minutes
+FROM pre_packed_worker_snapshot
+WHERE high_worker_utilization_indicator = 1
+GROUP BY grouping_helper
+),
+worker_top_stat AS
+(
+SELECT MIN(recent_history_duration_minutes) AS recent_history_duration_minutes,
+       MIN(worker_limit) AS worker_limit,
+       MAX(DATEDIFF(second, min_snapshot_time, max_snapshot_time)) AS longest_high_worker_duration_seconds,
+       AVG(avg_worker_count) AS avg_worker_count,
+       MAX(max_worker_count) AS max_worker_count,
+       COUNT(1) AS count_high_worker_intervals
+FROM packed_worker_snapshot 
+)
+INSERT INTO @DetectedTip (tip_id, details)
+SELECT 1370 AS tip_id,
+       CONCAT(
+             'In the last ', recent_history_duration_minutes,
+             ' minutes, there were ', count_high_worker_intervals, 
+             ' interval(s) with worker utilization staying above ', FORMAT(@HighPoolWorkerUtilizationThresholdRatio, 'P'), 
+             ' of the resource pool worker limit of approximately ', FORMAT(worker_limit, '#,0'),
+             ' workers. The longest such interval lasted ', FORMAT(longest_high_worker_duration_seconds, '#,0'),
+             ' seconds. Across all such intervals, the average number of workers used was ', FORMAT(avg_worker_count, '#,0.00'),
+             ' and the maximum number of workers used was ', FORMAT(max_worker_count, '#,0'),
+             '.'
+             ) AS details
+FROM worker_top_stat 
+WHERE count_high_worker_intervals > 0
 ;
 
 -- Return detected tips
