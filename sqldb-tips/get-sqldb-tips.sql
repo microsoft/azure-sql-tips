@@ -2,7 +2,7 @@
 Returns a set of tips to improve database design, health, and performance in Azure SQL Database.
 For a detailed description and the latest version of the script, see https://aka.ms/sqldbtips
 
-v20201230.1
+v20201230.2
 */
 
 -- Set to 1 to output tips as a JSON value
@@ -2053,7 +2053,7 @@ worker_snapshot AS
 SELECT snapshot_time,
        duration_ms,
        active_worker_count,
-       active_worker_count * 100. / max_worker_percent AS max_worker,
+       active_worker_count * 100. / NULLIF(max_worker_percent, 0) AS max_worker,
        IIF(max_worker_percent > @HighPoolWorkerUtilizationThresholdRatio * 100., 1, 0) AS high_worker_utilization_indicator
 FROM sys.dm_resource_governor_resource_pools_history_ex
 WHERE @EngineEdition = 5
