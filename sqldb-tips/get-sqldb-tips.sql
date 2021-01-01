@@ -135,7 +135,13 @@ DECLARE
 @HighGroupWorkerUtilizationThresholdRatio decimal(3,2) = 0.8,
 
 -- 1370: The minimum ratio of resource pool workers used to maximum workers per resource pool considered as being too high
-@HighPoolWorkerUtilizationThresholdRatio decimal(3,2) = 0.7
+@HighPoolWorkerUtilizationThresholdRatio decimal(3,2) = 0.7,
+
+-- 1380: The length of recent time interval to use when filtering network connectivity ring buffer events
+@NotableNetworkEventsIntervalMinutes int = 60,
+
+-- 1380: Minimum duration of login considered too long
+@NotableNetworkEventsSlowLoginThresholdMs int = 5000
 ;
 
 DECLARE @TipDefinition table (
@@ -225,7 +231,8 @@ VALUES
 (1340, 'Tempdb data used size is close to MAXSIZE',             95, 'https://aka.ms/sqldbtips#1340'),
 (1350, 'Tempdb log allocated size is close to MAXSIZE',         80, 'https://aka.ms/sqldbtips#1350'),
 (1360, 'Worker utilization is close to workload group limit',   80, 'https://aka.ms/sqldbtips#1360'),
-(1370, 'Worker utilization is close to resource pool limit',    80, 'https://aka.ms/sqldbtips#1370')
+(1370, 'Worker utilization is close to resource pool limit',    80, 'https://aka.ms/sqldbtips#1370'),
+(1380, 'Notable network connectivity events found',             60, 'https://aka.ms/sqldbtips#1380')
 ;
 
 -- MAXDOP
@@ -1730,7 +1737,9 @@ FROM query_wait_stats
 query_wait_stats_summary AS
 (
 SELECT query_hash,
-       STRING_AGG(wait_category_desc, ' | ') WITHIN GROUP (ORDER BY total_query_wait_time_ms DESC) AS ranked_wait_categories
+       STRING_AGG(wait_category_desc, ' | ')
+       WITHIN GROUP (ORDER BY total_query_wait_time_ms DESC)
+       AS ranked_wait_categories
 FROM query_wait_stats_ratio
 GROUP BY query_hash
 )
@@ -2115,6 +2124,121 @@ SELECT 1370 AS tip_id,
 FROM worker_top_stat 
 WHERE count_high_worker_intervals > 0
 ;
+
+-- Notable connectivity events
+DECLARE @crb TABLE (
+                   event_time datetime NOT NULL,
+                   record xml NOT NULL
+                   );
+
+-- stage XML in a table variable to enable parallelism when processing XQuery expressions
+INSERT INTO @crb (event_time, record)
+SELECT DATEADD(millisecond, -1 * (si.cpu_ticks/(si.cpu_ticks/si.ms_ticks) - rb.timestamp), CURRENT_TIMESTAMP) AS event_time,
+       TRY_CAST(rb.record AS XML) AS record
+FROM sys.dm_os_ring_buffers AS rb
+CROSS JOIN sys.dm_os_sys_info AS si
+WHERE rb.ring_buffer_type = 'RING_BUFFER_CONNECTIVITY'
+      AND
+      TRY_CAST(rb.record AS XML) IS NOT NULL;
+
+DROP TABLE IF EXISTS ##tips_connectivity_event;
+
+WITH connectivity_event AS
+(
+SELECT event_time,
+       record
+FROM @crb
+),
+shredded_connectivity_event AS
+(
+SELECT event_time,
+       record.value('(./Record/ConnectivityTraceRecord/RemoteHost/text())[1]','varchar(30)') AS remote_host,
+       record.value('(./Record/ConnectivityTraceRecord/LoginTimersInMilliseconds/TotalTime/text())[1]','int') AS login_total_time_ms,
+       record.value('(./Record/ConnectivityTraceRecord/RecordType/text())[1]','varchar(50)') AS record_type,
+       record.value('(./Record/ConnectivityTraceRecord/RecordSource/text())[1]','varchar(50)') AS record_source,
+       record.value('(./Record/ConnectivityTraceRecord/TdsDisconnectFlags/PhysicalConnectionIsKilled/text())[1]','bit') AS physical_connection_is_killed,
+       record.value('(./Record/ConnectivityTraceRecord/TdsDisconnectFlags/DisconnectDueToReadError/text())[1]','bit') AS disconnect_due_to_read_error,
+       record.value('(./Record/ConnectivityTraceRecord/TdsDisconnectFlags/NetworkErrorFoundInInputStream/text())[1]','bit') AS network_error_found_in_input_stream,
+       record.value('(./Record/ConnectivityTraceRecord/TdsDisconnectFlags/ErrorFoundBeforeLogin/text())[1]','bit') AS error_found_before_login,
+       record.value('(./Record/ConnectivityTraceRecord/TdsDisconnectFlags/SessionIsKilled/text())[1]','bit') AS session_is_killed,
+       record.value('(./Record/ConnectivityTraceRecord/Spid/text())[1]','int') AS spid,
+       record.value('(./Record/ConnectivityTraceRecord/OSError/text())[1]','int') AS os_error,
+       record.value('(./Record/ConnectivityTraceRecord/SniConsumerError/text())[1]','int') AS sni_consumer_error,
+       record.value('(./Record/ConnectivityTraceRecord/State/text())[1]','int') AS state,
+       record.value('(./Record/ConnectivityTraceRecord/RemotePort/text())[1]','int') AS remote_port,
+       record.value('(./Record/ConnectivityTraceRecord/LocalHost/text())[1]','varchar(30)') AS local_host,
+       record.value('(./Record/ConnectivityTraceRecord/LocalPort/text())[1]','int') AS local_port,
+       record.value('(./Record/ConnectivityTraceRecord/TdsBufInfo/InputBufError/text())[1]','int') AS input_buf_error,
+       record.value('(./Record/ConnectivityTraceRecord/TdsBufInfo/OutputBufError/text())[1]','int') AS output_buf_error,
+       record.value('(./Record/ConnectivityTraceRecord/TdsBuffersInformation/TdsInputBufferError/text())[1]','int') AS tds_input_buffer_error,
+       record.value('(./Record/ConnectivityTraceRecord/TdsBuffersInformation/TdsOutputBufferError/text())[1]','int') AS tds_output_buffer_error,
+       record.value('(./Record/ConnectivityTraceRecord/LoginTimersInMilliseconds/EnqueueTime/text())[1]','int') AS login_enqueue_time_ms,
+       record.value('(./Record/ConnectivityTraceRecord/LoginTimersInMilliseconds/NetWritesTime/text())[1]','int') AS login_net_writes_time_ms,
+       record.value('(./Record/ConnectivityTraceRecord/LoginTimersInMilliseconds/NetReadsTime/text())[1]','int') AS login_net_reads_time_ms,
+       record.value('(./Record/ConnectivityTraceRecord/LoginTimersInMilliseconds/Ssl/TotalTime/text())[1]','int') AS login_ssl_total_time_ms,
+       record.value('(./Record/ConnectivityTraceRecord/LoginTimersInMilliseconds/TriggerAndResGovTime/TotalTime/text())[1]','int') AS login_trigger_rg_total_time_ms,
+       record.value('(./Record/ConnectivityTraceRecord/LoginTimersInMilliseconds/TriggerAndResGovTime/FindLogin/text())[1]','int') AS login_trigger_rg_find_login_time_ms,
+       record.value('(./Record/ConnectivityTraceRecord/LoginTimersInMilliseconds/TriggerAndResGovTime/LogonTriggers/text())[1]','int') AS login_trigger_rg_logon_triggers_time_ms,
+       record.value('(./Record/ConnectivityTraceRecord/LoginTimersInMilliseconds/TriggerAndResGovTime/ExecClassifier/text())[1]','int') AS login_trigger_rg_exec_classifier_time_ms,
+       record.value('(./Record/ConnectivityTraceRecord/LoginTimersInMilliseconds/TriggerAndResGovTime/SessionRecover/text())[1]','int') AS login_trigger_rg_session_recover_time_ms
+FROM connectivity_event
+)
+SELECT sce.event_time,
+       sce.record_type,
+       sce.record_source,
+       sce.spid,
+       sce.os_error,
+       sce.sni_consumer_error,
+       m.text AS sni_consumer_error_message,
+       sce.state AS sni_consumer_error_state,
+       sce.remote_host,
+       sce.remote_port,
+       sce.local_host,
+       sce.local_port,
+       COALESCE(sce.tds_input_buffer_error, sce.input_buf_error) AS tds_input_buffer_error,
+       COALESCE(sce.tds_output_buffer_error, sce.output_buf_error) AS tds_output_buffer_error,
+       sce.physical_connection_is_killed,
+       sce.disconnect_due_to_read_error,
+       sce.network_error_found_in_input_stream,
+       sce.error_found_before_login,
+       sce.session_is_killed,
+       sce.login_total_time_ms,
+       sce.login_enqueue_time_ms,
+       sce.login_net_writes_time_ms,
+       sce.login_net_reads_time_ms,
+       sce.login_ssl_total_time_ms,
+       sce.login_trigger_rg_total_time_ms,
+       sce.login_trigger_rg_find_login_time_ms,
+       sce.login_trigger_rg_logon_triggers_time_ms,
+       sce.login_trigger_rg_exec_classifier_time_ms,
+       sce.login_trigger_rg_session_recover_time_ms
+INTO ##tips_connectivity_event
+FROM shredded_connectivity_event AS sce
+LEFT JOIN sys.messages AS m
+ON sce.sni_consumer_error = m.message_id
+   AND
+   m.language_id = 1033
+WHERE sce.event_time > DATEADD(minute, -@NotableNetworkEventsIntervalMinutes, CURRENT_TIMESTAMP) -- ignore older events
+      AND
+      sce.remote_host <> '<named pipe>' -- ignore SQL DB internal connections
+      AND
+      (
+      (sce.record_type = 'Error' AND NOT (sce.sni_consumer_error = 18456 AND sce.state = 123))
+      OR
+      (sce.record_type = 'LoginTimers' AND sce.login_total_time_ms > @NotableNetworkEventsSlowLoginThresholdMs)
+      OR
+      (sce.record_type = 'ConnectionClose' AND (sce.physical_connection_is_killed = 1 OR sce.disconnect_due_to_read_error = 1 OR sce.network_error_found_in_input_stream = 1 OR sce.error_found_before_login = 1 OR sce.session_is_killed = 1))
+      )
+;
+
+IF @@ROWCOUNT > 0
+    INSERT INTO @DetectedTip (tip_id, details)
+    SELECT 1380 AS tip_id, 
+           CONCAT(
+                 'In the last ', FORMAT(@NotableNetworkEventsIntervalMinutes, '#,0'), 
+                 ' minutes, notable network connectivity events have occurred. For details, execute this query in the same database, or any database in the same elastic pool:', @CRLF, 
+                 'SELECT * FROM ##tips_connectivity_event ORDER BY event_time DESC;'
+                 ) AS details;
 
 -- Return detected tips
 
