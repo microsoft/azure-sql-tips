@@ -2,7 +2,7 @@
 Returns a set of tips to improve database design, health, and performance in Azure SQL Database.
 For a detailed description and the latest version of the script, see https://aka.ms/sqldbtips
 
-v20201230.2
+v20210101.1
 */
 
 -- Set to 1 to output tips as a JSON value
@@ -232,7 +232,7 @@ VALUES
 (1350, 'Tempdb log allocated size is close to MAXSIZE',         80, 'https://aka.ms/sqldbtips#1350'),
 (1360, 'Worker utilization is close to workload group limit',   80, 'https://aka.ms/sqldbtips#1360'),
 (1370, 'Worker utilization is close to resource pool limit',    80, 'https://aka.ms/sqldbtips#1370'),
-(1380, 'Notable network connectivity events found',             60, 'https://aka.ms/sqldbtips#1380')
+(1380, 'Notable network connectivity events found',             50, 'https://aka.ms/sqldbtips#1380')
 ;
 
 -- MAXDOP
@@ -2236,7 +2236,7 @@ IF @@ROWCOUNT > 0
     SELECT 1380 AS tip_id, 
            CONCAT(
                  'In the last ', FORMAT(@NotableNetworkEventsIntervalMinutes, '#,0'), 
-                 ' minutes, notable network connectivity events have occurred. For details, execute this query in the same database, or any database in the same elastic pool:', @CRLF, 
+                 ' minutes, notable network connectivity events have occurred. For details, execute this query in the same database:', @CRLF, 
                  'SELECT * FROM ##tips_connectivity_event ORDER BY event_time DESC;'
                  ) AS details;
 
