@@ -2,7 +2,7 @@
 Returns a set of tips to improve database design, health, and performance in Azure SQL Database.
 For a detailed description and the latest version of the script, see https://aka.ms/sqldbtips
 
-v20210101.1
+v20210106.1
 */
 
 -- Set to 1 to output tips as a JSON value
@@ -11,7 +11,7 @@ DECLARE @JSONOutput bit = 0;
 -- Debug flag to return all tips regardless of database state
 DECLARE @ReturnAllTips bit = 0;
 
--- Next three variables apply to "Top queries" hint, adjust if needed
+-- Next three variables apply to "Top queries" (1320) hint, adjust if needed
 
 -- The length of recent time interval to use when determining top queries. Default is last 1 hour.
 -- Setting this to NULL disables the "Top queries" hint
@@ -618,6 +618,8 @@ WHERE ius.database_id = DB_ID()
       AND
       i.is_unique_constraint = 0
       AND
+      i.is_unique = 0
+      AND
       o.is_ms_shipped = 0
       AND
       (ius.user_seeks + ius.user_scans + ius.user_lookups) * 1. / NULLIF(ius.user_updates, 0) < @IndexReadWriteThresholdRatio
@@ -634,7 +636,7 @@ SELECT STRING_AGG(
                  ) WITHIN GROUP (ORDER BY schema_name, object_name, index_name)
        AS details
 FROM index_usage
-HAVING COUNT(1) > 1
+HAVING COUNT(1) > 0
 )
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1170 AS tip_id,
@@ -1896,7 +1898,7 @@ SELECT 1320 AS tip_id,
        STRING_AGG(
                  CAST(CONCAT(
                             'query hash: ', CONVERT(varchar(30), query_hash, 1),
-                            ', rankings: (CPU time: ', CAST(cpu_time_rank AS varchar(11)),
+                            ', ranks: (CPU time: ', CAST(cpu_time_rank AS varchar(11)),
                             ', duration: ', CAST(duration_rank AS varchar(11)),
                             ', executions: ', CAST(executions_rank AS varchar(11)),
                             ', logical IO reads: ', CAST(logical_io_reads_rank AS varchar(11)),
@@ -1907,7 +1909,7 @@ SELECT 1320 AS tip_id,
                             ', query_id: ', IIF(query_id IS NOT NULL, CAST(query_id AS varchar(11)), CONCAT('multiple (', CAST(count_queries AS varchar(11)), ')')),
                             ', plan_id: ', IIF(plan_id IS NOT NULL, CAST(plan_id AS varchar(11)), CONCAT('multiple (', CAST(count_plans AS varchar(11)), ')')),
                             ', executions: (regular: ', CAST(count_regular_executions AS varchar(11)), ', aborted: ', CAST(count_aborted_executions AS varchar(11)), ', exception: ', CAST(count_exception_executions AS varchar(11)), ')',
-                            ', ranked waits: ', ISNULL(ranked_wait_categories, 'N/A')
+                            ', weighted wait categories: ', ISNULL(ranked_wait_categories, 'N/A')
                             ) AS nvarchar(max)), @CRLF
                  )
                  WITHIN GROUP (ORDER BY duration_rank)
@@ -1937,7 +1939,7 @@ INSERT INTO #tempdb_space_used
 EXEC tempdb.sys.sp_spaceused @oneresultset = 1;
 
 IF @@ROWCOUNT <> 1
-    THROW 50020, 'sp_spaceused returned the number of rows other than 1.', 1;
+    THROW 50020, 'tempdb.sys.sp_spaceused returned the number of rows other than 1.', 1;
 
 WITH tempdb_file_size AS
 (
