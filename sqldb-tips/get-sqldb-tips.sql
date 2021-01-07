@@ -141,7 +141,13 @@ DECLARE
 @NotableNetworkEventsIntervalMinutes int = 60,
 
 -- 1380: Minimum duration of login considered too long
-@NotableNetworkEventsSlowLoginThresholdMs int = 5000
+@NotableNetworkEventsSlowLoginThresholdMs int = 5000,
+
+-- 1390: Minimum instance CPU percentage considered too high
+@HighInstanceCPUThresholdPercent decimal(5,2) = 90,
+
+-- 1390: Minimum duration of a high instance CPU period considered significant
+@HighInstanceCPUMinThresholdSeconds int = 300
 ;
 
 DECLARE @TipDefinition table (
@@ -179,9 +185,9 @@ IF EXISTS (
           WHERE next_end_time IS NULL
                 AND
                 (
-                rs.avg_cpu_percent > 98
+                rs.avg_cpu_percent > 95
                 OR
-                rs.avg_instance_cpu_percent > 95
+                rs.avg_instance_cpu_percent > 97
                 )
           )
     THROW 50010, 'CPU utilization is too high. Execute the script at a later time.', 1;
@@ -192,47 +198,48 @@ IF DB_NAME() = 'master' AND @EngineEdition = 5
 -- Define all tips
 INSERT INTO @TipDefinition (tip_id, tip_name, confidence_percent, tip_url)
 VALUES
-(1000, 'Reduce MAXDOP on all replicas',                            90, 'https://aka.ms/sqldbtips#1000'),
-(1010, 'Reduce MAXDOP on primary',                                 90, 'https://aka.ms/sqldbtips#1010'),
-(1020, 'Reduce MAXDOP on secondaries',                             90, 'https://aka.ms/sqldbtips#1020'),
-(1030, 'Use the latest database compatibility level',              70, 'https://aka.ms/sqldbtips#1030'),
-(1040, 'Enable auto-create statistics',                            95, 'https://aka.ms/sqldbtips#1040'),
-(1050, 'Enable auto-update statistics',                            95, 'https://aka.ms/sqldbtips#1050'),
-(1060, 'Enable RCSI',                                              80, 'https://aka.ms/sqldbtips#1060'),
-(1070, 'Enable Query Store',                                       90, 'https://aka.ms/sqldbtips#1070'),
-(1071, 'Change Query Store operation mode to read-write',          90, 'https://aka.ms/sqldbtips#1071'),
-(1072, 'Change Query Store capture mode from NONE to AUTO/ALL',    90, 'https://aka.ms/sqldbtips#1072'),
-(1080, 'Disable AUTO_SHRINK',                                      99, 'https://aka.ms/sqldbtips#1080'),
-(1100, 'Avoid GUID leading columns in btree indexes',              60, 'https://aka.ms/sqldbtips#1100'),
-(1110, 'Enable FLGP auto-tuning',                                  95, 'https://aka.ms/sqldbtips#1110'),
-(1120, 'Used data size is close to MAXSIZE',                       80, 'https://aka.ms/sqldbtips#1120'),
-(1130, 'Allocated data size is close to MAXSIZE',                  60, 'https://aka.ms/sqldbtips#1130'),
-(1140, 'Allocated data size is much larger than used data size',   50, 'https://aka.ms/sqldbtips#1140'),
-(1150, 'Recent CPU throttling found',                              90, 'https://aka.ms/sqldbtips#1150'),
-(1160, 'Recent out of memory errors found',                        80, 'https://aka.ms/sqldbtips#1160'),
-(1165, 'Recent memory grant waits and timeouts found',             70, 'https://aka.ms/sqldbtips#1165'),
-(1170, 'Nonclustered indexes with low reads found',                60, 'https://aka.ms/sqldbtips#1170'),
-(1180, 'ROW or PAGE compression opportunities may exist',          65, 'https://aka.ms/sqldbtips#1180'),
-(1190, 'Transaction log IO is close to limit',                     70, 'https://aka.ms/sqldbtips#1190'),
-(1200, 'Plan cache is bloated by single-use plans',                90, 'https://aka.ms/sqldbtips#1200'),
-(1210, 'Missing indexes may be impacting performance',             70, 'https://aka.ms/sqldbtips#1210'),
-(1220, 'Redo queue or a secondary replica is large',               60, 'https://aka.ms/sqldbtips#1220'),
-(1230, 'Data IOPS are close to workload group limit',              70, 'https://aka.ms/sqldbtips#1230'),
-(1240, 'Workload group IO governance impact is significant',       40, 'https://aka.ms/sqldbtips#1240'),
-(1250, 'Data IOPS are close to resource pool limit',               70, 'https://aka.ms/sqldbtips#1250'),
-(1260, 'Resouce pool IO governance impact is significant',         40, 'https://aka.ms/sqldbtips#1260'),
-(1270, 'Persistent Version Store size is large',                   70, 'https://aka.ms/sqldbtips#1270'),
-(1280, 'Paused resumable index operations found',                  90, 'https://aka.ms/sqldbtips#1280'),
-(1290, 'Clustered columnstore candidates found',                   50, 'https://aka.ms/sqldbtips#1290'),
-(1300, 'Geo-replication state may be unhealthy',                   70, 'https://aka.ms/sqldbtips#1300'),
-(1310, 'Last partitions are not empty',                            80, 'https://aka.ms/sqldbtips#1310'),
-(1320, 'Top queries should be investigated and tuned',             90, 'https://aka.ms/sqldbtips#1320'),
-(1330, 'Tempdb data allocated size is close to MAXSIZE',           70, 'https://aka.ms/sqldbtips#1330'),
-(1340, 'Tempdb data used size is close to MAXSIZE',                95, 'https://aka.ms/sqldbtips#1340'),
-(1350, 'Tempdb log allocated size is close to MAXSIZE',            80, 'https://aka.ms/sqldbtips#1350'),
-(1360, 'Worker utilization is close to workload group limit',      80, 'https://aka.ms/sqldbtips#1360'),
-(1370, 'Worker utilization is close to resource pool limit',       80, 'https://aka.ms/sqldbtips#1370'),
-(1380, 'Notable network connectivity events found',                50, 'https://aka.ms/sqldbtips#1380')
+(1000, 'Reduce MAXDOP on all replicas',                            90, 'https://aka.ms/sqldbtipswiki#1000'),
+(1010, 'Reduce MAXDOP on primary',                                 90, 'https://aka.ms/sqldbtipswiki#1010'),
+(1020, 'Reduce MAXDOP on secondaries',                             90, 'https://aka.ms/sqldbtipswiki#1020'),
+(1030, 'Use the latest database compatibility level',              70, 'https://aka.ms/sqldbtipswiki#1030'),
+(1040, 'Enable auto-create statistics',                            95, 'https://aka.ms/sqldbtipswiki#1040'),
+(1050, 'Enable auto-update statistics',                            95, 'https://aka.ms/sqldbtipswiki#1050'),
+(1060, 'Enable RCSI',                                              80, 'https://aka.ms/sqldbtipswiki#1060'),
+(1070, 'Enable Query Store',                                       90, 'https://aka.ms/sqldbtipswiki#1070'),
+(1071, 'Change Query Store operation mode to read-write',          90, 'https://aka.ms/sqldbtipswiki#1071'),
+(1072, 'Change Query Store capture mode from NONE to AUTO/ALL',    90, 'https://aka.ms/sqldbtipswiki#1072'),
+(1080, 'Disable AUTO_SHRINK',                                      99, 'https://aka.ms/sqldbtipswiki#1080'),
+(1100, 'Avoid GUID leading columns in btree indexes',              60, 'https://aka.ms/sqldbtipswiki#1100'),
+(1110, 'Enable FLGP auto-tuning',                                  95, 'https://aka.ms/sqldbtipswiki#1110'),
+(1120, 'Used data size is close to MAXSIZE',                       80, 'https://aka.ms/sqldbtipswiki#1120'),
+(1130, 'Allocated data size is close to MAXSIZE',                  60, 'https://aka.ms/sqldbtipswiki#1130'),
+(1140, 'Allocated data size is much larger than used data size',   50, 'https://aka.ms/sqldbtipswiki#1140'),
+(1150, 'Recent CPU throttling found',                              90, 'https://aka.ms/sqldbtipswiki#1150'),
+(1160, 'Recent out of memory errors found',                        80, 'https://aka.ms/sqldbtipswiki#1160'),
+(1165, 'Recent memory grant waits and timeouts found',             70, 'https://aka.ms/sqldbtipswiki#1165'),
+(1170, 'Nonclustered indexes with low reads found',                60, 'https://aka.ms/sqldbtipswiki#1170'),
+(1180, 'ROW or PAGE compression opportunities may exist',          65, 'https://aka.ms/sqldbtipswiki#1180'),
+(1190, 'Transaction log IO is close to limit',                     70, 'https://aka.ms/sqldbtipswiki#1190'),
+(1200, 'Plan cache is bloated by single-use plans',                90, 'https://aka.ms/sqldbtipswiki#1200'),
+(1210, 'Missing indexes may be impacting performance',             70, 'https://aka.ms/sqldbtipswiki#1210'),
+(1220, 'Redo queue or a secondary replica is large',               60, 'https://aka.ms/sqldbtipswiki#1220'),
+(1230, 'Data IOPS are close to workload group limit',              70, 'https://aka.ms/sqldbtipswiki#1230'),
+(1240, 'Workload group IO governance impact is significant',       40, 'https://aka.ms/sqldbtipswiki#1240'),
+(1250, 'Data IOPS are close to resource pool limit',               70, 'https://aka.ms/sqldbtipswiki#1250'),
+(1260, 'Resouce pool IO governance impact is significant',         40, 'https://aka.ms/sqldbtipswiki#1260'),
+(1270, 'Persistent Version Store size is large',                   70, 'https://aka.ms/sqldbtipswiki#1270'),
+(1280, 'Paused resumable index operations found',                  90, 'https://aka.ms/sqldbtipswiki#1280'),
+(1290, 'Clustered columnstore candidates found',                   50, 'https://aka.ms/sqldbtipswiki#1290'),
+(1300, 'Geo-replication state may be unhealthy',                   70, 'https://aka.ms/sqldbtipswiki#1300'),
+(1310, 'Last partitions are not empty',                            80, 'https://aka.ms/sqldbtipswiki#1310'),
+(1320, 'Top queries should be investigated and tuned',             90, 'https://aka.ms/sqldbtipswiki#1320'),
+(1330, 'Tempdb data allocated size is close to MAXSIZE',           70, 'https://aka.ms/sqldbtipswiki#1330'),
+(1340, 'Tempdb data used size is close to MAXSIZE',                95, 'https://aka.ms/sqldbtipswiki#1340'),
+(1350, 'Tempdb log allocated size is close to MAXSIZE',            80, 'https://aka.ms/sqldbtipswiki#1350'),
+(1360, 'Worker utilization is close to workload group limit',      80, 'https://aka.ms/sqldbtipswiki#1360'),
+(1370, 'Worker utilization is close to resource pool limit',       80, 'https://aka.ms/sqldbtipswiki#1370'),
+(1380, 'Notable network connectivity events found',                50, 'https://aka.ms/sqldbtipswiki#1380'),
+(1390, 'Instance CPU utilization is high',                         60, 'https://aka.ms/sqldbtipswiki#1390')
 ;
 
 -- MAXDOP
@@ -816,7 +823,7 @@ SELECT STRING_AGG(
                             ', partition range: ', partition_range, 
                             ', partition range size (MB): ', FORMAT(partition_range_size_mb, 'N'), 
                             ', present compression type: ', present_compression_type,
-                            ', new compression type: ', new_compression_type
+                            ', suggested compression type: ', new_compression_type
                             ) AS nvarchar(max)), @CRLF
                  )
                  WITHIN GROUP (ORDER BY object_id, index_name, partition_range, partition_range_size_mb, new_compression_type)
@@ -859,7 +866,7 @@ packed_log_rate_snapshot AS
 (
 SELECT MIN(end_time) AS min_end_time,
        MAX(end_time) AS max_end_time,
-       AVG(avg_log_write_percent) AS avg_log_write_percent
+       MAX(avg_log_write_percent) AS max_log_write_percent
 FROM pre_packed_log_rate_snapshot
 WHERE high_log_rate_indicator = 1
 GROUP BY grouping_helper
@@ -867,16 +874,16 @@ GROUP BY grouping_helper
 log_rate_top_stat AS
 (
 SELECT MAX(DATEDIFF(second, min_end_time, max_end_time)) AS top_log_rate_duration_seconds,
-       MAX(avg_log_write_percent) AS top_log_write_percent,
+       MAX(max_log_write_percent) AS top_log_write_percent,
        COUNT(1) AS count_high_log_write_intervals
 FROM packed_log_rate_snapshot 
 )
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1190 AS tip_id,
        CONCAT(
-             'In the last hour, there were  ', count_high_log_write_intervals, 
+             'In the last hour, there were ', count_high_log_write_intervals, 
              ' interval(s) with transaction log IO staying above ', @HighLogRateThresholdPercent, 
-             '% of the limit for the service objective. The longest such interval lasted ', FORMAT(top_log_rate_duration_seconds, '#,0'),
+             '% of the service objective limit. The longest such interval lasted ', FORMAT(top_log_rate_duration_seconds, '#,0'),
              ' seconds, and the maximum log IO was ', FORMAT(top_log_write_percent, '#,0.00'),
              '%.'
              ) AS details
@@ -2263,6 +2270,58 @@ IF @@ROWCOUNT > 0
                  ' minutes, notable network connectivity events have occurred. For details, execute this query in the same database:', @CRLF, 
                  'SELECT * FROM ##tips_connectivity_event ORDER BY event_time DESC;'
                  ) AS details;
+
+-- High instance CPU
+WITH
+instance_cpu_snapshot AS
+(
+SELECT end_time,
+       avg_instance_cpu_percent,
+       IIF(avg_instance_cpu_percent > @HighInstanceCPUThresholdPercent, 1, 0) AS high_instance_cpu_indicator
+FROM sys.dm_db_resource_stats
+WHERE @EngineEdition = 5
+),
+pre_packed_instance_cpu_snapshot AS
+(
+SELECT end_time,
+       avg_instance_cpu_percent,
+       high_instance_cpu_indicator,
+       ROW_NUMBER() OVER (ORDER BY end_time) -- row number across all readings, in increasing chronological order
+       -
+       SUM(high_instance_cpu_indicator) OVER (ORDER BY end_time ROWS UNBOUNDED PRECEDING) -- running count of all intervals where log rate exceeded the threshold
+       AS grouping_helper -- this difference remains constant while log rate is above the threshold, and can be used to collapse/pack an interval using aggregation
+FROM instance_cpu_snapshot
+),
+packed_instance_cpu_snapshot AS
+(
+SELECT MIN(end_time) AS min_end_time,
+       MAX(end_time) AS max_end_time,
+       MAX(avg_instance_cpu_percent) AS max_instance_cpu_percent
+FROM pre_packed_instance_cpu_snapshot
+WHERE high_instance_cpu_indicator = 1
+GROUP BY grouping_helper
+HAVING DATEDIFF(second, MIN(end_time), MAX(end_time)) > @HighInstanceCPUMinThresholdSeconds
+),
+instance_cpu_top_stat AS
+(
+SELECT MAX(DATEDIFF(second, min_end_time, max_end_time)) AS top_instance_cpu_duration_seconds,
+       MAX(max_instance_cpu_percent) AS top_instance_cpu_percent,
+       COUNT(1) AS count_high_instance_cpu_intervals
+FROM packed_instance_cpu_snapshot 
+)
+INSERT INTO @DetectedTip (tip_id, details)
+SELECT 1390 AS tip_id,
+       CONCAT(
+             'In the last hour, there were ', count_high_instance_cpu_intervals, 
+             ' interval(s) with instance CPU utilization staying above ', @HighInstanceCPUThresholdPercent, 
+             '% for at least ' , FORMAT(@HighInstanceCPUMinThresholdSeconds, '#,0'),
+             ' seconds. The longest such interval lasted ', FORMAT(top_instance_cpu_duration_seconds, '#,0'),
+             ' seconds, and the maximum instance CPU utilization was ', FORMAT(top_instance_cpu_percent, '#,0.00'),
+             '%.'
+             ) AS details
+FROM instance_cpu_top_stat 
+WHERE count_high_instance_cpu_intervals > 0
+;
 
 -- Return detected tips
 
