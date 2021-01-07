@@ -2,7 +2,7 @@
 Returns a set of tips to improve database design, health, and performance in Azure SQL Database.
 For a detailed description and the latest version of the script, see https://aka.ms/sqldbtips
 
-v20210106.1
+v20210107.1
 */
 
 -- Set to 1 to output tips as a JSON value
@@ -165,7 +165,7 @@ BEGIN TRY
 DECLARE @EngineEdition int = CAST(SERVERPROPERTY('EngineEdition') AS int);
 
 IF @EngineEdition NOT IN (5,8)
-    THROW 50005, 'This script runs on Azure SQL Database and Azure SQL Managed Instance only.', 1;
+    THROW 50005, 'This script is for Azure SQL Database and Azure SQL Managed Instance only.', 1;
 
 -- Bail out if current CPU utilization is very high, to avoid impacting workloads
 IF EXISTS (
@@ -184,7 +184,7 @@ IF EXISTS (
                 rs.avg_instance_cpu_percent > 95
                 )
           )
-    THROW 50010, 'CPU utilization is too high. Execute script at a later time.', 1;
+    THROW 50010, 'CPU utilization is too high. Execute the script at a later time.', 1;
 
 IF DB_NAME() = 'master' AND @EngineEdition = 5
     THROW 50015, 'Execute this script in a user database, not in the ''master'' database.', 1;
@@ -192,47 +192,47 @@ IF DB_NAME() = 'master' AND @EngineEdition = 5
 -- Define all tips
 INSERT INTO @TipDefinition (tip_id, tip_name, confidence_percent, tip_url)
 VALUES
-(1000, 'Reduce MAXDOP on all replicas',                         90, 'https://aka.ms/sqldbtips#1000'),
-(1010, 'Reduce MAXDOP on primary',                              90, 'https://aka.ms/sqldbtips#1010'),
-(1020, 'Reduce MAXDOP on secondaries',                          90, 'https://aka.ms/sqldbtips#1020'),
-(1030, 'Use the latest database compatibility level',           70, 'https://aka.ms/sqldbtips#1030'),
-(1040, 'Enable auto-create statistics',                         95, 'https://aka.ms/sqldbtips#1040'),
-(1050, 'Enable auto-update statistics',                         95, 'https://aka.ms/sqldbtips#1050'),
-(1060, 'Enable RCSI',                                           80, 'https://aka.ms/sqldbtips#1060'),
-(1070, 'Enable Query Store',                                    90, 'https://aka.ms/sqldbtips#1070'),
-(1071, 'Change Query Store operation mode to read-write',       90, 'https://aka.ms/sqldbtips#1071'),
-(1072, 'Change Query Store capture mode from NONE to AUTO/ALL', 90, 'https://aka.ms/sqldbtips#1072'),
-(1080, 'Disable AUTO_SHRINK',                                   99, 'https://aka.ms/sqldbtips#1080'),
-(1100, 'Avoid GUID leading columns in btree indexes',           60, 'https://aka.ms/sqldbtips#1100'),
-(1110, 'Enable FLGP auto-tuning',                               95, 'https://aka.ms/sqldbtips#1110'),
-(1120, 'Used space is close to MAXSIZE',                        80, 'https://aka.ms/sqldbtips#1120'),
-(1130, 'Allocated space is close to MAXSIZE',                   60, 'https://aka.ms/sqldbtips#1130'),
-(1140, 'Allocated space is much larger than used space',        50, 'https://aka.ms/sqldbtips#1140'),
-(1150, 'Recent CPU throttling found',                           90, 'https://aka.ms/sqldbtips#1150'),
-(1160, 'Recent out of memory errors found',                     80, 'https://aka.ms/sqldbtips#1160'),
-(1165, 'Recent memory grant waits and timeouts found',          70, 'https://aka.ms/sqldbtips#1165'),
-(1170, 'Nonclustered indexes with low reads found',             60, 'https://aka.ms/sqldbtips#1170'),
-(1180, 'ROW or PAGE compression opportunities may exist',       65, 'https://aka.ms/sqldbtips#1180'),
-(1190, 'Transaction log IO is close to limit',                  70, 'https://aka.ms/sqldbtips#1190'),
-(1200, 'Plan cache is bloated by single-use plans',             90, 'https://aka.ms/sqldbtips#1200'),
-(1210, 'Missing indexes may be impacting performance',          70, 'https://aka.ms/sqldbtips#1210'),
-(1220, 'Redo queue or a secondary replica is large',            60, 'https://aka.ms/sqldbtips#1220'),
-(1230, 'Data IOPS are close to workload group limit',           70, 'https://aka.ms/sqldbtips#1230'),
-(1240, 'Workload group IO governance impact is significant',    40, 'https://aka.ms/sqldbtips#1240'),
-(1250, 'Data IOPS are close to resource pool limit',            70, 'https://aka.ms/sqldbtips#1250'),
-(1260, 'Resouce pool IO governance impact is significant',      40, 'https://aka.ms/sqldbtips#1260'),
-(1270, 'Persistent Version Store size is large',                70, 'https://aka.ms/sqldbtips#1270'),
-(1280, 'Paused resumable index operations found',               90, 'https://aka.ms/sqldbtips#1280'),
-(1290, 'Clustered columnstore candidates found',                50, 'https://aka.ms/sqldbtips#1290'),
-(1300, 'Geo-replication state may be unhealthy',                70, 'https://aka.ms/sqldbtips#1300'),
-(1310, 'Last partitions are not empty',                         80, 'https://aka.ms/sqldbtips#1310'),
-(1320, 'Top queries should be investigated and tuned',          90, 'https://aka.ms/sqldbtips#1320'),
-(1330, 'Tempdb data allocated size is close to MAXSIZE',        70, 'https://aka.ms/sqldbtips#1330'),
-(1340, 'Tempdb data used size is close to MAXSIZE',             95, 'https://aka.ms/sqldbtips#1340'),
-(1350, 'Tempdb log allocated size is close to MAXSIZE',         80, 'https://aka.ms/sqldbtips#1350'),
-(1360, 'Worker utilization is close to workload group limit',   80, 'https://aka.ms/sqldbtips#1360'),
-(1370, 'Worker utilization is close to resource pool limit',    80, 'https://aka.ms/sqldbtips#1370'),
-(1380, 'Notable network connectivity events found',             50, 'https://aka.ms/sqldbtips#1380')
+(1000, 'Reduce MAXDOP on all replicas',                            90, 'https://aka.ms/sqldbtips#1000'),
+(1010, 'Reduce MAXDOP on primary',                                 90, 'https://aka.ms/sqldbtips#1010'),
+(1020, 'Reduce MAXDOP on secondaries',                             90, 'https://aka.ms/sqldbtips#1020'),
+(1030, 'Use the latest database compatibility level',              70, 'https://aka.ms/sqldbtips#1030'),
+(1040, 'Enable auto-create statistics',                            95, 'https://aka.ms/sqldbtips#1040'),
+(1050, 'Enable auto-update statistics',                            95, 'https://aka.ms/sqldbtips#1050'),
+(1060, 'Enable RCSI',                                              80, 'https://aka.ms/sqldbtips#1060'),
+(1070, 'Enable Query Store',                                       90, 'https://aka.ms/sqldbtips#1070'),
+(1071, 'Change Query Store operation mode to read-write',          90, 'https://aka.ms/sqldbtips#1071'),
+(1072, 'Change Query Store capture mode from NONE to AUTO/ALL',    90, 'https://aka.ms/sqldbtips#1072'),
+(1080, 'Disable AUTO_SHRINK',                                      99, 'https://aka.ms/sqldbtips#1080'),
+(1100, 'Avoid GUID leading columns in btree indexes',              60, 'https://aka.ms/sqldbtips#1100'),
+(1110, 'Enable FLGP auto-tuning',                                  95, 'https://aka.ms/sqldbtips#1110'),
+(1120, 'Used data size is close to MAXSIZE',                       80, 'https://aka.ms/sqldbtips#1120'),
+(1130, 'Allocated data size is close to MAXSIZE',                  60, 'https://aka.ms/sqldbtips#1130'),
+(1140, 'Allocated data size is much larger than used data size',   50, 'https://aka.ms/sqldbtips#1140'),
+(1150, 'Recent CPU throttling found',                              90, 'https://aka.ms/sqldbtips#1150'),
+(1160, 'Recent out of memory errors found',                        80, 'https://aka.ms/sqldbtips#1160'),
+(1165, 'Recent memory grant waits and timeouts found',             70, 'https://aka.ms/sqldbtips#1165'),
+(1170, 'Nonclustered indexes with low reads found',                60, 'https://aka.ms/sqldbtips#1170'),
+(1180, 'ROW or PAGE compression opportunities may exist',          65, 'https://aka.ms/sqldbtips#1180'),
+(1190, 'Transaction log IO is close to limit',                     70, 'https://aka.ms/sqldbtips#1190'),
+(1200, 'Plan cache is bloated by single-use plans',                90, 'https://aka.ms/sqldbtips#1200'),
+(1210, 'Missing indexes may be impacting performance',             70, 'https://aka.ms/sqldbtips#1210'),
+(1220, 'Redo queue or a secondary replica is large',               60, 'https://aka.ms/sqldbtips#1220'),
+(1230, 'Data IOPS are close to workload group limit',              70, 'https://aka.ms/sqldbtips#1230'),
+(1240, 'Workload group IO governance impact is significant',       40, 'https://aka.ms/sqldbtips#1240'),
+(1250, 'Data IOPS are close to resource pool limit',               70, 'https://aka.ms/sqldbtips#1250'),
+(1260, 'Resouce pool IO governance impact is significant',         40, 'https://aka.ms/sqldbtips#1260'),
+(1270, 'Persistent Version Store size is large',                   70, 'https://aka.ms/sqldbtips#1270'),
+(1280, 'Paused resumable index operations found',                  90, 'https://aka.ms/sqldbtips#1280'),
+(1290, 'Clustered columnstore candidates found',                   50, 'https://aka.ms/sqldbtips#1290'),
+(1300, 'Geo-replication state may be unhealthy',                   70, 'https://aka.ms/sqldbtips#1300'),
+(1310, 'Last partitions are not empty',                            80, 'https://aka.ms/sqldbtips#1310'),
+(1320, 'Top queries should be investigated and tuned',             90, 'https://aka.ms/sqldbtips#1320'),
+(1330, 'Tempdb data allocated size is close to MAXSIZE',           70, 'https://aka.ms/sqldbtips#1330'),
+(1340, 'Tempdb data used size is close to MAXSIZE',                95, 'https://aka.ms/sqldbtips#1340'),
+(1350, 'Tempdb log allocated size is close to MAXSIZE',            80, 'https://aka.ms/sqldbtips#1350'),
+(1360, 'Worker utilization is close to workload group limit',      80, 'https://aka.ms/sqldbtips#1360'),
+(1370, 'Worker utilization is close to resource pool limit',       80, 'https://aka.ms/sqldbtips#1370'),
+(1380, 'Notable network connectivity events found',                50, 'https://aka.ms/sqldbtips#1380')
 ;
 
 -- MAXDOP
@@ -458,22 +458,33 @@ WHERE name = 'FORCE_LAST_GOOD_PLAN'
 ;
 
 -- Used space close to maxsize
-INSERT INTO @DetectedTip (tip_id)
-SELECT 1120 AS tip_id
+WITH space_used AS
+(
+SELECT SUM(CAST(FILEPROPERTY(name, 'SpaceUsed') AS bigint) * 8 / 1024.) AS space_used_mb,
+       CAST(DATABASEPROPERTYEX(DB_NAME(), 'MaxSizeInBytes') AS bigint) / 1024. / 1024 AS max_size_mb
 FROM sys.database_files
 WHERE @EngineEdition = 5
       AND
       type_desc = 'ROWS'
       AND
       CAST(DATABASEPROPERTYEX(DB_NAME(), 'MaxSizeInBytes') AS bigint) <> -1 -- not applicable to Hyperscale
-HAVING SUM(CAST(FILEPROPERTY(name, 'SpaceUsed') AS bigint) * 8 / 1024.)
-       >
-       @UsedToMaxsizeSpaceThresholdRatio * CAST(DATABASEPROPERTYEX(DB_NAME(), 'MaxSizeInBytes') AS bigint) / 1024. / 1024 -- used space > n% of db maxsize
+HAVING COUNT(1) > 0
+)
+INSERT INTO @DetectedTip (tip_id, details)
+SELECT 1120 AS tip_id,
+       CONCAT(
+             'Used data size (MB): ', FORMAT(space_used_mb, '#,0.00'),
+             ', maximum data size (MB): ', FORMAT(max_size_mb, '#,0.00')
+             )
+FROM space_used
+WHERE space_used_mb > @UsedToMaxsizeSpaceThresholdRatio * max_size_mb -- used space > n% of db maxsize
 ;
 
 -- Allocated space close to maxsize
-INSERT INTO @DetectedTip (tip_id)
-SELECT 1130 AS tip_id
+WITH space_allocated AS
+(
+SELECT SUM(CAST(size AS bigint) * 8 / 1024.) AS space_allocated_mb,
+       CAST(DATABASEPROPERTYEX(DB_NAME(), 'MaxSizeInBytes') AS bigint) / 1024. / 1024 AS max_size_mb
 FROM sys.database_files
 WHERE @EngineEdition = 5
       AND
@@ -481,28 +492,39 @@ WHERE @EngineEdition = 5
       AND
       CAST(DATABASEPROPERTYEX(DB_NAME(), 'MaxSizeInBytes') AS bigint) <> -1 -- not applicable to Hyperscale
       AND
-      DATABASEPROPERTYEX(DB_NAME(), 'Edition') IN ('Premium','BusinessCritical')
-HAVING SUM(CAST(size AS bigint) * 8 / 1024.)
-       >
-       @AllocatedToMaxsizeSpaceThresholdRatio * CAST(DATABASEPROPERTYEX(DB_NAME(), 'MaxSizeInBytes') AS bigint) / 1024. / 1024 -- allocated space > n% of db maxsize
+      DATABASEPROPERTYEX(DB_NAME(), 'Edition') IN ('Premium','BusinessCritical') -- not relevant for remote storage SLOs
+HAVING COUNT(1) > 0
+)
+INSERT INTO @DetectedTip (tip_id, details)
+SELECT 1130 AS tip_id,
+       CONCAT(
+             'Allocated data size (MB): ', FORMAT(space_allocated_mb, '#,0.00'),
+             ', maximum data size (MB): ', FORMAT(max_size_mb, '#,0.00')
+             )
+FROM space_allocated
+WHERE space_allocated_mb > @AllocatedToMaxsizeSpaceThresholdRatio * max_size_mb -- allocated space > n% of db maxsize
 ;
 
 -- Allocated space >> used space
 WITH allocated_used_space AS
 (
-SELECT SUM(CAST(size AS bigint)) AS allocated_space,
-       SUM(CAST(FILEPROPERTY(name, 'SpaceUsed') AS bigint)) AS used_space
+SELECT SUM(CAST(size AS bigint) * 8 / 1024.) AS space_allocated_mb,
+       SUM(CAST(FILEPROPERTY(name, 'SpaceUsed') AS bigint)) / 1024. / 1024 AS space_used_mb
 FROM sys.database_files
 WHERE type_desc = 'ROWS'
 )
-INSERT INTO @DetectedTip (tip_id)
-SELECT 1140 AS tip_id
+INSERT INTO @DetectedTip (tip_id, details)
+SELECT 1140 AS tip_id,
+       CONCAT(
+             'Used data size (MB): ', FORMAT(space_used_mb, '#,0.00'),
+             ', allocated data size (MB): ', FORMAT(space_allocated_mb, '#,0.00')
+             )
 FROM allocated_used_space
-WHERE used_space * 8 / 1024. > @UsedToAllocatedSpaceDbMinSizeMB -- not relevant for small databases
+WHERE space_used_mb * 8 / 1024. > @UsedToAllocatedSpaceDbMinSizeMB -- not relevant for small databases
       AND
-      @UsedToAllocatedSpaceThresholdRatio * allocated_space > used_space -- allocated space is more than N times used space
+      @UsedToAllocatedSpaceThresholdRatio * space_allocated_mb > space_used_mb -- allocated space is more than N times used space
       AND
-      DATABASEPROPERTYEX(DB_NAME(), 'Edition') IN ('Premium','BusinessCritical')
+      DATABASEPROPERTYEX(DB_NAME(), 'Edition') IN ('Premium','BusinessCritical') -- not relevant for remote storage SLOs
 ;
 
 -- Recent CPU throttling
@@ -853,9 +875,9 @@ INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1190 AS tip_id,
        CONCAT(
              'In the last hour, there were  ', count_high_log_write_intervals, 
-             ' interval(s) with log rate staying above ', @HighLogRateThresholdPercent, 
-             '%. The longest such interval lasted ', FORMAT(top_log_rate_duration_seconds, '#,0'),
-             ' seconds, and the highest log rate was ', FORMAT(top_log_write_percent, '#,0.00'),
+             ' interval(s) with transaction log IO staying above ', @HighLogRateThresholdPercent, 
+             '% of the limit for the service objective. The longest such interval lasted ', FORMAT(top_log_rate_duration_seconds, '#,0'),
+             ' seconds, and the maximum log IO was ', FORMAT(top_log_write_percent, '#,0.00'),
              '%.'
              ) AS details
 FROM log_rate_top_stat 
