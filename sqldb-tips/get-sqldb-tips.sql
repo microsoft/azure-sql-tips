@@ -2,7 +2,7 @@
 Returns a set of tips to improve database design, health, and performance in Azure SQL Database.
 For a detailed description and the latest version of the script, see https://aka.ms/sqldbtips
 
-v20210107.2
+v20210108.1
 */
 
 -- Set to 1 to output tips as a JSON value
@@ -1494,11 +1494,11 @@ SELECT 1270 AS tip_id,
              'PVS size (GB): ', FORMAT(persistent_version_store_size_gb, 'N'), @CRLF,
              'online index version store size (GB): ', FORMAT(online_index_version_store_size_gb, 'N'), @CRLF,
              'current aborted transaction count: ', FORMAT(current_aborted_transaction_count, '#,0'), @CRLF,
-             'aborted transaction version cleaner start time: ', ISNULL(CONVERT(varchar(20), aborted_version_cleaner_start_time, 120), 'N/A'), @CRLF,
-             'aborted transaction version cleaner end time: ', ISNULL(CONVERT(varchar(20), aborted_version_cleaner_end_time, 120), 'N/A'), @CRLF,
-             'oldest transaction begin time: ',  ISNULL(CONVERT(varchar(30), oldest_transaction_begin_time, 121), 'N/A'), @CRLF,
-             'active transaction session_id: ', ISNULL(CAST(active_transaction_session_id AS varchar(11)), 'N/A'), @CRLF,
-             'active transaction elapsed time (seconds): ', ISNULL(CAST(active_transaction_elapsed_time_seconds AS varchar(11)), 'N/A'),
+             'aborted transaction version cleaner start time: ', ISNULL(CONVERT(varchar(20), aborted_version_cleaner_start_time, 120), '-'), @CRLF,
+             'aborted transaction version cleaner end time: ', ISNULL(CONVERT(varchar(20), aborted_version_cleaner_end_time, 120), '-'), @CRLF,
+             'oldest transaction begin time: ',  ISNULL(CONVERT(varchar(30), oldest_transaction_begin_time, 121), '-'), @CRLF,
+             'active transaction session_id: ', ISNULL(CAST(active_transaction_session_id AS varchar(11)), '-'), @CRLF,
+             'active transaction elapsed time (seconds): ', ISNULL(CAST(active_transaction_elapsed_time_seconds AS varchar(11)), '-'),
              @CRLF
              )
        AS details
@@ -2024,7 +2024,7 @@ SELECT 1320 AS tip_id,
                                   ', query_id: ', IIF(query_id IS NOT NULL, CAST(query_id AS varchar(11)), CONCAT('multiple (', CAST(count_queries AS varchar(11)), ')')),
                                   ', plan_id: ', IIF(plan_id IS NOT NULL, CAST(plan_id AS varchar(11)), CONCAT('multiple (', CAST(count_plans AS varchar(11)), ')')),
                                   ', executions: (regular: ', CAST(count_regular_executions AS varchar(11)), ', aborted: ', CAST(count_aborted_executions AS varchar(11)), ', exception: ', CAST(count_exception_executions AS varchar(11)), ')',
-                                  ', weighted wait categories: ', ISNULL(ranked_wait_categories, 'N/A')
+                                  ', weighted wait categories: ', ISNULL(ranked_wait_categories, '-')
                                   ) AS nvarchar(max)), @CRLF
                        )
                        WITHIN GROUP (ORDER BY duration_rank),
@@ -2448,7 +2448,7 @@ ELSE IF @JSONOutput = 1
            td.tip_name AS description,
            td.confidence_percent,
            td.tip_url AS URL,
-           dt.details
+           REPLACE(REPLACE(dt.details, CHAR(13), ''), NCHAR(160), '') AS details -- strip extra formatting
     FROM @TipDefinition AS td
     LEFT JOIN @DetectedTip AS dt
     ON dt.tip_id = td.tip_id
