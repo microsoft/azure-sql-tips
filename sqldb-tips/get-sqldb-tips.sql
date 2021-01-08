@@ -2,7 +2,7 @@
 Returns a set of tips to improve database design, health, and performance in Azure SQL Database.
 For a detailed description and the latest version of the script, see https://aka.ms/sqldbtips
 
-v20210107.1
+v20210107.2
 */
 
 -- Set to 1 to output tips as a JSON value
@@ -150,6 +150,8 @@ DECLARE
 @HighInstanceCPUMinThresholdSeconds int = 300
 ;
 
+DECLARE @ExecStartTime datetimeoffset = SYSDATETIMEOFFSET();
+
 DECLARE @TipDefinition table (
                              tip_id smallint NOT NULL PRIMARY KEY,
                              tip_name nvarchar(60) NOT NULL UNIQUE,
@@ -162,6 +164,7 @@ DECLARE @DetectedTip table (
                            );
 
 DECLARE @CRLF char(2) = CHAR(13) + CHAR(10);
+DECLARE @NbspCRLF nchar(3) = NCHAR(160) + NCHAR(13) + NCHAR(10);
 
 SET NOCOUNT ON;
 SET LOCK_TIMEOUT 5000; -- abort if another request holds a lock on metadata for too long
@@ -246,6 +249,7 @@ VALUES
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1000 AS tip_id,
        CONCAT(
+             @NbspCRLF,
              'MAXDOP for primary: ', CAST(value AS varchar(2)), @CRLF,
              'MAXDOP for secondary: ', ISNULL(CAST(value_for_secondary AS varchar(4)), 'NULL'), @CRLF
              )
@@ -261,6 +265,7 @@ WHERE name = N'MAXDOP'
 UNION
 SELECT 1010 AS tip_id,
        CONCAT(
+             @NbspCRLF,
              'MAXDOP for primary: ', CAST(value AS varchar(2)), @CRLF,
              'MAXDOP for secondary: ', ISNULL(CAST(value_for_secondary AS varchar(4)), 'NULL'), @CRLF
              )
@@ -276,6 +281,7 @@ WHERE name = N'MAXDOP'
 UNION
 SELECT 1020 AS tip_id,
        CONCAT(
+             @NbspCRLF,
              'MAXDOP for primary: ', CAST(value AS varchar(2)), @CRLF,
              'MAXDOP for secondary: ', ISNULL(CAST(value_for_secondary AS varchar(4)), 'NULL'), @CRLF
              )
@@ -295,7 +301,7 @@ WHERE @EngineEdition = 5
 -- Compatibility level
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1030 AS tip_id,
-       CONCAT('Present database compatibility level: ', CAST(d.compatibility_level AS varchar(3))) AS details
+       CONCAT(@NbspCRLF, 'Present database compatibility level: ', CAST(d.compatibility_level AS varchar(3)), @CRLF) AS details
 FROM sys.dm_exec_valid_use_hints AS h
 CROSS JOIN sys.databases AS d
 WHERE h.name LIKE 'QUERY[_]OPTIMIZER[_]COMPATIBILITY[_]LEVEL[_]%'
@@ -340,16 +346,20 @@ FROM sys.database_query_store_options
 WHERE actual_state_desc = 'OFF'
 UNION
 SELECT 1071 AS tip_id,
-       CASE readonly_reason
-           WHEN 1 THEN 'Database is in read-only mode.'
-           WHEN 2 THEN 'Database is in single-user mode.'
-           WHEN 4 THEN 'Database in in emergency mode.'
-           WHEN 8 THEN 'Database is a read-only replica.'
-           WHEN 65536 THEN 'The size of Query Store has reached the limit set by MAX_STORAGE_SIZE_MB option.'
-           WHEN 131072 THEN 'The number of queries in Query Store has reached the limit for the service objective. Remove unneeded queries or scale up to a higher service objective.'
-           WHEN 262144 THEN 'The size of in-memory Query Store data has reached maximum limit. Query Store will be in read-only state while this data is being persisted in the database.'
-           WHEN 524288 THEN 'Database has reached its maximum size limit.'
-       END
+       CONCAT(
+             @NbspCRLF,
+             CASE readonly_reason
+                 WHEN 1 THEN 'Database is in read-only mode.'
+                 WHEN 2 THEN 'Database is in single-user mode.'
+                 WHEN 4 THEN 'Database in in emergency mode.'
+                 WHEN 8 THEN 'Database is a read-only replica.'
+                 WHEN 65536 THEN 'The size of Query Store has reached the limit set by MAX_STORAGE_SIZE_MB option.'
+                 WHEN 131072 THEN 'The number of queries in Query Store has reached the limit for the service objective. Remove unneeded queries or scale up to a higher service objective.'
+                 WHEN 262144 THEN 'The size of in-memory Query Store data has reached maximum limit. Query Store will be in read-only state while this data is being persisted in the database.'
+                 WHEN 524288 THEN 'Database has reached its maximum size limit.'
+             END,
+             @CRLF
+             )
        AS details
 FROM sys.database_query_store_options
 WHERE actual_state_desc = 'READ_ONLY'
@@ -436,17 +446,21 @@ WHERE i.type_desc IN ('CLUSTERED','NONCLUSTERED') -- Btree indexes
 )
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1100 AS tip_id,
-       STRING_AGG(
-                 CAST(CONCAT(
-                            'schema: ', schema_name, 
-                            ', object: ', object_name, 
-                            ', index: ', index_name, 
-                            ', type: ', index_type,
-                            ', object_id: ', CAST(object_id AS varchar(11)),
-                            ', index_id: ', CAST(index_id AS varchar(11))
-                            ) AS nvarchar(max)), @CRLF
-                 )
-                 WITHIN GROUP (ORDER BY schema_name, object_name, index_type, index_name)
+       CONCAT(
+             @NbspCRLF,
+             STRING_AGG(
+                       CAST(CONCAT(
+                                  'schema: ', schema_name, 
+                                  ', object: ', object_name, 
+                                  ', index: ', index_name, 
+                                  ', type: ', index_type,
+                                  ', object_id: ', CAST(object_id AS varchar(11)),
+                                  ', index_id: ', CAST(index_id AS varchar(11))
+                                  ) AS nvarchar(max)), @CRLF
+                       )
+                       WITHIN GROUP (ORDER BY schema_name, object_name, index_type, index_name),
+             @CRLF
+             )
        AS details
 FROM guid_index
 HAVING COUNT(1) > 0
@@ -455,7 +469,7 @@ HAVING COUNT(1) > 0
 -- FLGP auto-tuning
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1110 AS tip_id,
-       CONCAT('Reason: ', reason_desc) AS details
+       CONCAT(@NbspCRLF, 'Reason: ', reason_desc, @CRLF) AS details
 FROM sys.database_automatic_tuning_options
 WHERE name = 'FORCE_LAST_GOOD_PLAN'
       AND
@@ -480,8 +494,10 @@ HAVING COUNT(1) > 0
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1120 AS tip_id,
        CONCAT(
+             @NbspCRLF,
              'Used data size (MB): ', FORMAT(space_used_mb, '#,0.00'),
-             ', maximum data size (MB): ', FORMAT(max_size_mb, '#,0.00')
+             ', maximum data size (MB): ', FORMAT(max_size_mb, '#,0.00'),
+             @CRLF
              )
 FROM space_used
 WHERE space_used_mb > @UsedToMaxsizeSpaceThresholdRatio * max_size_mb -- used space > n% of db maxsize
@@ -505,8 +521,10 @@ HAVING COUNT(1) > 0
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1130 AS tip_id,
        CONCAT(
+             @NbspCRLF,
              'Allocated data size (MB): ', FORMAT(space_allocated_mb, '#,0.00'),
-             ', maximum data size (MB): ', FORMAT(max_size_mb, '#,0.00')
+             ', maximum data size (MB): ', FORMAT(max_size_mb, '#,0.00'),
+             @CRLF
              )
 FROM space_allocated
 WHERE space_allocated_mb > @AllocatedToMaxsizeSpaceThresholdRatio * max_size_mb -- allocated space > n% of db maxsize
@@ -523,8 +541,10 @@ WHERE type_desc = 'ROWS'
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1140 AS tip_id,
        CONCAT(
+             @NbspCRLF,
              'Used data size (MB): ', FORMAT(space_used_mb, '#,0.00'),
-             ', allocated data size (MB): ', FORMAT(space_allocated_mb, '#,0.00')
+             ', allocated data size (MB): ', FORMAT(space_allocated_mb, '#,0.00'),
+             @CRLF
              )
 FROM allocated_used_space
 WHERE space_used_mb * 8 / 1024. > @UsedToAllocatedSpaceDbMinSizeMB -- not relevant for small databases
@@ -550,9 +570,11 @@ WHERE @EngineEdition = 5
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1150 AS tip_id,
        CONCAT(
+             @NbspCRLF,
              'In the last ', recent_history_duration_minutes, 
              ' minutes, there were ', count_cpu_delayed_intervals, 
-             ' occurrence(s) of CPU throttling. On average, CPU was throttled by ', FORMAT(avg_cpu_delay_percent, '#,0.00'), '%.'
+             ' occurrence(s) of CPU throttling. On average, CPU was throttled by ', FORMAT(avg_cpu_delay_percent, '#,0.00'), '%.',
+             @CRLF
              ) AS details
 FROM cpu_throttling
 WHERE avg_cpu_delay_percent > @CPUThrottlingDelayThresholdPercent
@@ -576,10 +598,12 @@ WHERE @EngineEdition = 5
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1160 AS tip_id,
        CONCAT(
+             @NbspCRLF,
              'In the last ', recent_history_duration_minutes, 
              ' minutes, there were ', count_oom, 
              ' out of memory errors in the ',
-             IIF(dso.service_objective = 'ElasticPool', CONCAT(QUOTENAME(dso.elastic_pool_name), ' elastic pool.'), CONCAT(QUOTENAME(DB_NAME(dso.database_id)), ' database.'))
+             IIF(dso.service_objective = 'ElasticPool', CONCAT(QUOTENAME(dso.elastic_pool_name), ' elastic pool.'), CONCAT(QUOTENAME(DB_NAME(dso.database_id)), ' database.')),
+             @CRLF
              ) AS details
 FROM oom
 CROSS JOIN sys.database_service_objectives AS dso
@@ -607,11 +631,13 @@ WHERE @EngineEdition = 5
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1165 AS tip_id,
        CONCAT(
+             @NbspCRLF,
              'In the last ', recent_history_duration_minutes, 
              ' minutes, there were ', count_memgrant_waiter, 
              ' requests waiting for a memory grant, and ', count_memgrant_timeout,
              ' memory grant timeouts in the ',
-             IIF(dso.service_objective = 'ElasticPool', CONCAT(QUOTENAME(dso.elastic_pool_name), ' elastic pool.'), CONCAT(QUOTENAME(DB_NAME(dso.database_id)), ' database.'))
+             IIF(dso.service_objective = 'ElasticPool', CONCAT(QUOTENAME(dso.elastic_pool_name), ' elastic pool.'), CONCAT(QUOTENAME(DB_NAME(dso.database_id)), ' database.')),
+             @CRLF
              ) AS details
 FROM memgrant
 CROSS JOIN sys.database_service_objectives AS dso
@@ -669,7 +695,14 @@ HAVING COUNT(1) > 0
 )
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1170 AS tip_id,
-       CONCAT('Since database engine startup at ', CONVERT(varchar(20), si.sqlserver_start_time, 120), ' UTC:', @CRLF, iua.details) AS details
+       CONCAT(
+             @NbspCRLF,
+             'Since database engine startup at ', CONVERT(varchar(20), si.sqlserver_start_time, 120),
+             ' UTC:',
+             @CRLF,
+             iua.details,
+             @CRLF
+             ) AS details
 FROM index_usage_agg AS iua
 CROSS JOIN sys.dm_os_sys_info AS si
 WHERE iua.details IS NOT NULL
@@ -833,7 +866,14 @@ HAVING COUNT(1) > 0
 )
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1180 AS tip_id,
-       CONCAT('Since database engine startup at ', CONVERT(varchar(20), si.sqlserver_start_time, 120), ' UTC:', @CRLF, ppga.details) AS details
+       CONCAT(
+             @NbspCRLF,
+             'Since database engine startup at ', CONVERT(varchar(20), si.sqlserver_start_time, 120),
+             ' UTC:',
+             @CRLF,
+             ppga.details,
+             @CRLF
+             ) AS details
 FROM packed_partition_group_agg AS ppga
 CROSS JOIN sys.dm_os_sys_info AS si
 WHERE ppga.details IS NOT NULL
@@ -881,11 +921,13 @@ FROM packed_log_rate_snapshot
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1190 AS tip_id,
        CONCAT(
+             @NbspCRLF,
              'In the last hour, there were ', count_high_log_write_intervals, 
              ' interval(s) with transaction log IO staying above ', @HighLogRateThresholdPercent, 
              '% of the service objective limit. The longest such interval lasted ', FORMAT(top_log_rate_duration_seconds, '#,0'),
              ' seconds, and the maximum log IO was ', FORMAT(top_log_write_percent, '#,0.00'),
-             '%.'
+             '%.',
+             @CRLF
              ) AS details
 FROM log_rate_top_stat 
 WHERE count_high_log_write_intervals > 0
@@ -909,16 +951,20 @@ GROUP BY t.dbid
 )
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1200 AS tip_id,
-       STRING_AGG(
-                 CAST(CONCAT(
-                            'database (id: ', database_id,
-                            ', name: ' + QUOTENAME(database_name), -- database name is only available for current database, include for usability if available
-                            '), single use plans take ', FORMAT(single_use_db_plan_cache_size_mb, 'N'),
-                            ' MB, or ', FORMAT(single_use_db_plan_cache_size_mb / total_db_plan_cache_size_mb, 'P'),
-                            ' of total cached plans for this database.'
-                            ) AS nvarchar(max)), @CRLF
-                 )
-                 WITHIN GROUP (ORDER BY database_name DESC, database_id)
+       CONCAT(
+             @NbspCRLF,
+             STRING_AGG(
+                       CAST(CONCAT(
+                                  'database (id: ', database_id,
+                                  ', name: ' + QUOTENAME(database_name), -- database name is only available for current database, include for usability if available
+                                  '), single use plans take ', FORMAT(single_use_db_plan_cache_size_mb, 'N'),
+                                  ' MB, or ', FORMAT(single_use_db_plan_cache_size_mb / total_db_plan_cache_size_mb, 'P'),
+                                  ' of total cached plans for this database.'
+                                  ) AS nvarchar(max)), @CRLF
+                       )
+                       WITHIN GROUP (ORDER BY database_name DESC, database_id),
+             @CRLF
+             )
        AS details
 FROM plan_cache_db_summary
 WHERE single_use_db_plan_cache_size_mb >= @SingleUsePlanSizeThresholdMB -- sufficiently large total size of single-use plans for a database
@@ -955,7 +1001,14 @@ HAVING COUNT(1) > 0
 )
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1210 AS tip_id,
-       CONCAT('Since database engine startup at ', CONVERT(varchar(20), si.sqlserver_start_time, 120), ' UTC:', @CRLF, mia.details) AS details
+       CONCAT(
+             @NbspCRLF,
+             'Since database engine startup at ', CONVERT(varchar(20), si.sqlserver_start_time, 120),
+             ' UTC:',
+             @CRLF,
+             mia.details,
+             @CRLF
+             ) AS details
 FROM missing_index_agg AS mia
 CROSS JOIN sys.dm_os_sys_info AS si
 WHERE mia.details IS NOT NULL
@@ -965,11 +1018,13 @@ WHERE mia.details IS NOT NULL
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1220 AS tip_id,
        CONCAT(
+             @NbspCRLF,
              'Current redo queue size: ',
              FORMAT(redo_queue_size / 1024., 'N'),
              ' MB. Most recent sampling of redo rate: ',
              FORMAT(redo_rate / 1024., 'N'),
-             ' MB/s.'
+             ' MB/s.',
+             @CRLF
              )
        AS details
 FROM sys.dm_database_replica_states
@@ -1146,6 +1201,7 @@ FROM packed_io_rg_snapshot_impact
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1230 AS tip_id,
        CONCAT(
+             @NbspCRLF,
              'In the last ', recent_history_duration_minutes,
              ' minutes, there were ', count_io_rg_at_limit_intervals, 
              ' time interval(s) when total data IO approached the workload group (database-level) IOPS limit of the service objective, ', FORMAT(primary_group_max_io, '#,0'), ' IOPS.', @CRLF,
@@ -1162,7 +1218,8 @@ SELECT 1230 AS tip_id,
              'average read IO throughput: ', FORMAT(avg_read_throughput_mbps, '#,0.00'), ' MBps; ', @CRLF,
              'maximum read IO throughput: ', FORMAT(max_read_throughput_mbps, '#,0.00'), ' MBps; ', @CRLF,
              'average background write IO throughput: ', FORMAT(avg_background_write_throughput_mbps, '#,0.00'), ' MBps; ', @CRLF,
-             'maximum background write IO throughput: ', FORMAT(max_background_write_throughput_mbps, '#,0.00'), ' MBps.'
+             'maximum background write IO throughput: ', FORMAT(max_background_write_throughput_mbps, '#,0.00'), ' MBps.',
+             @CRLF
              )
        AS details
 FROM packed_io_rg_snapshot_limit_agg
@@ -1170,6 +1227,7 @@ WHERE count_io_rg_at_limit_intervals > 0
 UNION
 SELECT 1240 AS tip_id,
        CONCAT(
+             @NbspCRLF,
              'In the last ', recent_history_duration_minutes,
              ' minutes, there were ', count_io_rg_impact_intervals, 
              ' time interval(s) when workload group (database-level) resource governance for the selected service objective was significantly delaying IO.', @CRLF,
@@ -1186,7 +1244,8 @@ SELECT 1240 AS tip_id,
              'average read IO throughput: ', FORMAT(avg_read_throughput_mbps, '#,0.00'), ' MBps; ', @CRLF,
              'maximum read IO throughput: ', FORMAT(max_read_throughput_mbps, '#,0.00'), ' MBps; ', @CRLF,
              'average background write IO throughput: ', FORMAT(avg_background_write_throughput_mbps, '#,0.00'), ' MBps; ', @CRLF,
-             'maximum background write IO throughput: ', FORMAT(max_background_write_throughput_mbps, '#,0.00'), ' MBps.'
+             'maximum background write IO throughput: ', FORMAT(max_background_write_throughput_mbps, '#,0.00'), ' MBps.',
+             @CRLF
              )
        AS details
 FROM packed_io_rg_snapshot_impact_agg
@@ -1339,6 +1398,7 @@ FROM packed_io_rg_snapshot_impact
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1250 AS tip_id,
        CONCAT(
+             @NbspCRLF,
              'In the last ', l.recent_history_duration_minutes,
              ' minutes, there were ', l.count_io_rg_at_limit_intervals, 
              ' time interval(s) when total data IO approached the resource pool IOPS limit of the service objective ', IIF(dso.service_objective = 'ElasticPool', CONCAT('for elastic pool ', QUOTENAME(dso.elastic_pool_name)), ''), ', ', FORMAT(l.pool_max_io, '#,0'), ' IOPS.', @CRLF,
@@ -1351,7 +1411,8 @@ SELECT 1250 AS tip_id,
              'average write IOPS: ', FORMAT(l.avg_write_iops, '#,0'), '; ', @CRLF,
              'maximum write IOPS: ', FORMAT(l.max_write_iops, '#,0'), '; ', @CRLF,
              'average read IO throughput: ', FORMAT(l.avg_read_throughput_mbps, '#,0.00'), ' MBps; ', @CRLF,
-             'maximum read IO throughput: ', FORMAT(l.max_read_throughput_mbps, '#,0.00'), ' MBps.'
+             'maximum read IO throughput: ', FORMAT(l.max_read_throughput_mbps, '#,0.00'), ' MBps.',
+             @CRLF
              )
        AS details
 FROM packed_io_rg_snapshot_limit_agg AS l
@@ -1362,6 +1423,7 @@ WHERE l.count_io_rg_at_limit_intervals > 0
 UNION
 SELECT 1260 AS tip_id,
        CONCAT(
+             @NbspCRLF,
              'In the last ', i.recent_history_duration_minutes,
              ' minutes, there were ', i.count_io_rg_impact_intervals, 
              ' time interval(s) when resource pool resource governance for the selected service objective was significantly delaying IO', IIF(dso.service_objective = 'ElasticPool', CONCAT(' for elastic pool ', QUOTENAME(dso.elastic_pool_name)), ''), '.', @CRLF,
@@ -1374,7 +1436,8 @@ SELECT 1260 AS tip_id,
              'average write IOPS: ', FORMAT(i.avg_write_iops, '#,0'), '; ', @CRLF,
              'maximum write IOPS: ', FORMAT(i.max_write_iops, '#,0'), '; ', @CRLF,
              'average read IO throughput: ', FORMAT(i.avg_read_throughput_mbps, '#,0.00'), ' MBps; ', @CRLF,
-             'maximum read IO throughput: ', FORMAT(i.max_read_throughput_mbps, '#,0.00'), ' MBps.'
+             'maximum read IO throughput: ', FORMAT(i.max_read_throughput_mbps, '#,0.00'), ' MBps.',
+             @CRLF
              )
        AS details
 FROM packed_io_rg_snapshot_impact_agg AS i
@@ -1427,6 +1490,7 @@ WHERE pvss.database_id = DB_ID()
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1270 AS tip_id,
        CONCAT(
+             @NbspCRLF,
              'PVS size (GB): ', FORMAT(persistent_version_store_size_gb, 'N'), @CRLF,
              'online index version store size (GB): ', FORMAT(online_index_version_store_size_gb, 'N'), @CRLF,
              'current aborted transaction count: ', FORMAT(current_aborted_transaction_count, '#,0'), @CRLF,
@@ -1434,7 +1498,8 @@ SELECT 1270 AS tip_id,
              'aborted transaction version cleaner end time: ', ISNULL(CONVERT(varchar(20), aborted_version_cleaner_end_time, 120), 'N/A'), @CRLF,
              'oldest transaction begin time: ',  ISNULL(CONVERT(varchar(30), oldest_transaction_begin_time, 121), 'N/A'), @CRLF,
              'active transaction session_id: ', ISNULL(CAST(active_transaction_session_id AS varchar(11)), 'N/A'), @CRLF,
-             'active transaction elapsed time (seconds): ', ISNULL(CAST(active_transaction_elapsed_time_seconds AS varchar(11)), 'N/A')
+             'active transaction elapsed time (seconds): ', ISNULL(CAST(active_transaction_elapsed_time_seconds AS varchar(11)), 'N/A'),
+             @CRLF
              )
        AS details
 FROM pvs_db_stats
@@ -1466,22 +1531,26 @@ WHERE iro.state_desc = 'PAUSED'
 )
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1280 AS tip_id,
-       STRING_AGG(
-                 CAST(CONCAT(
-                            'schema name: ', QUOTENAME(schema_name) COLLATE DATABASE_DEFAULT, @CRLF,
-                            'object name: ', QUOTENAME(object_name) COLLATE DATABASE_DEFAULT, @CRLF,
-                            'index name: ', QUOTENAME(index_name) COLLATE DATABASE_DEFAULT, @CRLF,
-                            'index type: ' + index_type COLLATE DATABASE_DEFAULT + CHAR(13) + CHAR(10),
-                            'percent complete: ', FORMAT(percent_complete, '#,0.00'), '%', @CRLF,
-                            'start time: ', CONVERT(varchar(20), start_time, 120), @CRLF,
-                            'last pause time: ', CONVERT(varchar(20), last_pause_time, 120), @CRLF,
-                            'total execution time (minutes): ', FORMAT(total_execution_time_minutes, '#,0'), @CRLF,
-                            'space allocated by resumable index operation (MB): ', FORMAT(index_operation_allocated_space_mb, '#,0.00'), @CRLF,
-                            'time remaining to auto-abort (minutes): ' + FORMAT(time_to_auto_abort_minutes, '#,0') + CHAR(13) + CHAR(10),
-                            'index operation SQL statement: ', sql_text COLLATE DATABASE_DEFAULT, @CRLF
-                            ) AS nvarchar(max)), @CRLF
-                 )
-                 WITHIN GROUP (ORDER BY schema_name, object_name, index_name)
+       CONCAT(
+             @NbspCRLF,
+             STRING_AGG(
+                       CAST(CONCAT(
+                                  'schema name: ', QUOTENAME(schema_name) COLLATE DATABASE_DEFAULT, @CRLF,
+                                  'object name: ', QUOTENAME(object_name) COLLATE DATABASE_DEFAULT, @CRLF,
+                                  'index name: ', QUOTENAME(index_name) COLLATE DATABASE_DEFAULT, @CRLF,
+                                  'index type: ' + index_type COLLATE DATABASE_DEFAULT + CHAR(13) + CHAR(10),
+                                  'percent complete: ', FORMAT(percent_complete, '#,0.00'), '%', @CRLF,
+                                  'start time: ', CONVERT(varchar(20), start_time, 120), @CRLF,
+                                  'last pause time: ', CONVERT(varchar(20), last_pause_time, 120), @CRLF,
+                                  'total execution time (minutes): ', FORMAT(total_execution_time_minutes, '#,0'), @CRLF,
+                                  'space allocated by resumable index operation (MB): ', FORMAT(index_operation_allocated_space_mb, '#,0.00'), @CRLF,
+                                  'time remaining to auto-abort (minutes): ' + FORMAT(time_to_auto_abort_minutes, '#,0') + CHAR(13) + CHAR(10),
+                                  'index operation SQL statement: ', sql_text COLLATE DATABASE_DEFAULT, @CRLF
+                                  ) AS nvarchar(max)), @CRLF
+                       )
+                       WITHIN GROUP (ORDER BY schema_name, object_name, index_name),
+             @CRLF
+             )
 FROM resumable_index_op 
 HAVING COUNT(1) > 0
 ;
@@ -1614,7 +1683,14 @@ FROM cci_candidate_table
 )
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1290 AS tip_id,
-       CONCAT('Since database engine startup at ', CONVERT(varchar(20), si.sqlserver_start_time, 120), ' UTC:', @CRLF, ccd.details) AS details
+       CONCAT(
+             @NbspCRLF,
+             'Since database engine startup at ', CONVERT(varchar(20), si.sqlserver_start_time, 120),
+             ' UTC:',
+             @CRLF,
+             ccd.details,
+             @CRLF
+             ) AS details
 FROM cci_candidate_details AS ccd
 CROSS JOIN sys.dm_os_sys_info AS si
 WHERE ccd.details IS NOT NULL
@@ -1654,7 +1730,11 @@ HAVING COUNT(1) > 0
 )
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1300 AS tip_id,
-       details
+       CONCAT(
+             @NbspCRLF,
+             details,
+             @CRLF
+             )
 FROM geo_replication_link_details
 ;
 
@@ -1693,17 +1773,21 @@ HAVING SUM(ps.row_count) > 0
 )
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1310 AS tip_id,
-       STRING_AGG(
-                 CAST(CONCAT(
-                            'schema: ', schema_name, ', ',
-                            'object: ', object_name, ', ',
-                            'total partitions: ', FORMAT(partition_count, '#,0'), ', ',
-                            'partition number: ', FORMAT(partition_number, '#,0'), ', ',
-                            'partition rows: ', FORMAT(partition_rows, '#,0'), ', ',
-                            'partition size (MB): ', FORMAT(partition_size_mb, '#,0.00'), ', '
-                            ) AS nvarchar(max)), @CRLF
-                 )
-                 WITHIN GROUP (ORDER BY schema_name, object_name, partition_number)
+       CONCAT(
+             @NbspCRLF,
+             STRING_AGG(
+                       CAST(CONCAT(
+                                  'schema: ', schema_name, ', ',
+                                  'object: ', object_name, ', ',
+                                  'total partitions: ', FORMAT(partition_count, '#,0'), ', ',
+                                  'partition number: ', FORMAT(partition_number, '#,0'), ', ',
+                                  'partition rows: ', FORMAT(partition_rows, '#,0'), ', ',
+                                  'partition size (MB): ', FORMAT(partition_size_mb, '#,0.00'), ', '
+                                  ) AS nvarchar(max)), @CRLF
+                       )
+                       WITHIN GROUP (ORDER BY schema_name, object_name, partition_number),
+             @CRLF
+             )
        AS details
 FROM object_last_partition
 HAVING COUNT(1) > 0
@@ -1924,24 +2008,28 @@ WHERE (
 )
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1320 AS tip_id,
-       STRING_AGG(
-                 CAST(CONCAT(
-                            'query hash: ', CONVERT(varchar(30), query_hash, 1),
-                            ', ranks: (CPU time: ', CAST(cpu_time_rank AS varchar(11)),
-                            ', duration: ', CAST(duration_rank AS varchar(11)),
-                            ', executions: ', CAST(executions_rank AS varchar(11)),
-                            ', logical IO reads: ', CAST(logical_io_reads_rank AS varchar(11)),
-                            ', max used memory: ', CAST(total_query_max_used_memory_rank AS varchar(11)),
-                            ', log bytes used: ', CAST(total_log_bytes_used_rank AS varchar(11)),
-                            ', tempdb used: ', CAST(total_tempdb_space_used_rank AS varchar(11)),
-                            ', parallelism: ', CAST(total_dop_rank AS varchar(11)), ')',
-                            ', query_id: ', IIF(query_id IS NOT NULL, CAST(query_id AS varchar(11)), CONCAT('multiple (', CAST(count_queries AS varchar(11)), ')')),
-                            ', plan_id: ', IIF(plan_id IS NOT NULL, CAST(plan_id AS varchar(11)), CONCAT('multiple (', CAST(count_plans AS varchar(11)), ')')),
-                            ', executions: (regular: ', CAST(count_regular_executions AS varchar(11)), ', aborted: ', CAST(count_aborted_executions AS varchar(11)), ', exception: ', CAST(count_exception_executions AS varchar(11)), ')',
-                            ', weighted wait categories: ', ISNULL(ranked_wait_categories, 'N/A')
-                            ) AS nvarchar(max)), @CRLF
-                 )
-                 WITHIN GROUP (ORDER BY duration_rank)
+       CONCAT(
+             @NbspCRLF,
+             STRING_AGG(
+                       CAST(CONCAT(
+                                  'query hash: ', CONVERT(varchar(30), query_hash, 1),
+                                  ', ranks: (CPU time: ', CAST(cpu_time_rank AS varchar(11)),
+                                  ', duration: ', CAST(duration_rank AS varchar(11)),
+                                  ', executions: ', CAST(executions_rank AS varchar(11)),
+                                  ', logical IO reads: ', CAST(logical_io_reads_rank AS varchar(11)),
+                                  ', max used memory: ', CAST(total_query_max_used_memory_rank AS varchar(11)),
+                                  ', log bytes used: ', CAST(total_log_bytes_used_rank AS varchar(11)),
+                                  ', tempdb used: ', CAST(total_tempdb_space_used_rank AS varchar(11)),
+                                  ', parallelism: ', CAST(total_dop_rank AS varchar(11)), ')',
+                                  ', query_id: ', IIF(query_id IS NOT NULL, CAST(query_id AS varchar(11)), CONCAT('multiple (', CAST(count_queries AS varchar(11)), ')')),
+                                  ', plan_id: ', IIF(plan_id IS NOT NULL, CAST(plan_id AS varchar(11)), CONCAT('multiple (', CAST(count_plans AS varchar(11)), ')')),
+                                  ', executions: (regular: ', CAST(count_regular_executions AS varchar(11)), ', aborted: ', CAST(count_aborted_executions AS varchar(11)), ', exception: ', CAST(count_exception_executions AS varchar(11)), ')',
+                                  ', weighted wait categories: ', ISNULL(ranked_wait_categories, 'N/A')
+                                  ) AS nvarchar(max)), @CRLF
+                       )
+                       WITHIN GROUP (ORDER BY duration_rank),
+             @CRLF
+             )
        AS details
 FROM top_query
 HAVING COUNT(1) > 0
@@ -2005,10 +2093,12 @@ SELECT CASE WHEN file_type = 'ROWS' AND space_type = 'allocated' THEN 1330
        END 
        AS tip_id,
        CONCAT(
+             @NbspCRLF,
              'tempdb ', CASE file_type WHEN 'ROWS' THEN 'data' WHEN 'LOG' THEN 'log' END , ' allocated size (MB): ', FORMAT(allocated_size_mb, '#,0.00'),
              ', tempdb data used size (MB): ' + FORMAT(used_size_mb, '#,0.00'),
              ', tempdb ', CASE file_type WHEN 'ROWS' THEN 'data' WHEN 'LOG' THEN 'log' END, ' MAXSIZE (MB): ', FORMAT(max_size_mb, '#,0.00'),
-             ', tempdb data files: ' + CAST(count_files AS varchar(11))
+             ', tempdb data files: ' + CAST(count_files AS varchar(11)),
+             @CRLF
              )
        AS details
 FROM tempdb_tip
@@ -2073,6 +2163,7 @@ FROM packed_worker_snapshot
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1360 AS tip_id,
        CONCAT(
+             @NbspCRLF,
              'In the last ', recent_history_duration_minutes,
              ' minutes, there were ', count_high_worker_intervals, 
              ' interval(s) with worker utilization staying above ', FORMAT(@HighGroupWorkerUtilizationThresholdRatio, 'P'), 
@@ -2080,7 +2171,8 @@ SELECT 1360 AS tip_id,
              ' workers. The longest such interval lasted ', FORMAT(longest_high_worker_duration_seconds, '#,0'),
              ' seconds. Across all such intervals, the average number of workers used was ', FORMAT(avg_worker_count, '#,0.00'),
              ' and the maximum number of workers used was ', FORMAT(max_worker_count, '#,0'),
-             '.'
+             '.',
+             @CRLF
              ) AS details
 FROM worker_top_stat 
 WHERE count_high_worker_intervals > 0
@@ -2143,6 +2235,7 @@ FROM packed_worker_snapshot
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1370 AS tip_id,
        CONCAT(
+             @NbspCRLF,
              'In the last ', recent_history_duration_minutes,
              ' minutes, there were ', count_high_worker_intervals, 
              ' interval(s) with worker utilization staying above ', FORMAT(@HighPoolWorkerUtilizationThresholdRatio, 'P'), 
@@ -2150,7 +2243,8 @@ SELECT 1370 AS tip_id,
              ' workers. The longest such interval lasted ', FORMAT(longest_high_worker_duration_seconds, '#,0'),
              ' seconds. Across all such intervals, the average number of workers used was ', FORMAT(avg_worker_count, '#,0.00'),
              ' and the maximum number of workers used was ', FORMAT(max_worker_count, '#,0'),
-             '.'
+             '.',
+             @CRLF
              ) AS details
 FROM worker_top_stat 
 WHERE count_high_worker_intervals > 0
@@ -2266,9 +2360,11 @@ IF @@ROWCOUNT > 0
     INSERT INTO @DetectedTip (tip_id, details)
     SELECT 1380 AS tip_id, 
            CONCAT(
+                 @NbspCRLF,
                  'In the last ', FORMAT(@NotableNetworkEventsIntervalMinutes, '#,0'), 
                  ' minutes, notable network connectivity events have occurred. For details, execute this query in the same database:', @CRLF, 
-                 'SELECT * FROM ##tips_connectivity_event ORDER BY event_time DESC;'
+                 'SELECT * FROM ##tips_connectivity_event ORDER BY event_time DESC;',
+                 @CRLF
                  ) AS details;
 
 -- High instance CPU
@@ -2312,12 +2408,14 @@ FROM packed_instance_cpu_snapshot
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1390 AS tip_id,
        CONCAT(
+             @NbspCRLF,
              'In the last hour, there were ', count_high_instance_cpu_intervals, 
              ' interval(s) with instance CPU utilization staying above ', @HighInstanceCPUThresholdPercent, 
              '% for at least ' , FORMAT(@HighInstanceCPUMinThresholdSeconds, '#,0'),
              ' seconds. The longest such interval lasted ', FORMAT(top_instance_cpu_duration_seconds, '#,0'),
              ' seconds, and the maximum instance CPU utilization was ', FORMAT(top_instance_cpu_percent, '#,0.00'),
-             '%.'
+             '%.',
+             @CRLF
              ) AS details
 FROM instance_cpu_top_stat 
 WHERE count_high_instance_cpu_intervals > 0
@@ -2362,6 +2460,12 @@ ELSE IF @JSONOutput = 1
     FROM tips
     ORDER BY confidence_percent DESC
     FOR JSON AUTO;
+
+PRINT CONCAT(
+            'Execution start time: ', @ExecStartTime,
+            ', duration: ', FORMAT(DATEDIFF(second, @ExecStartTime, SYSDATETIMEOFFSET()), '#,0'),
+            ' seconds'
+            );
 
 END TRY
 BEGIN CATCH
