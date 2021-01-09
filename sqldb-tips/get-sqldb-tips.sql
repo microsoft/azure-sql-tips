@@ -241,7 +241,7 @@ VALUES
 (1350, 'Tempdb log allocated size is close to MAXSIZE',            80, 'https://aka.ms/sqldbtipswiki#1350'),
 (1360, 'Worker utilization is close to workload group limit',      80, 'https://aka.ms/sqldbtipswiki#1360'),
 (1370, 'Worker utilization is close to resource pool limit',       80, 'https://aka.ms/sqldbtipswiki#1370'),
-(1380, 'Notable network connectivity events found',                50, 'https://aka.ms/sqldbtipswiki#1380'),
+(1380, 'Notable network connectivity events found',                30, 'https://aka.ms/sqldbtipswiki#1380'),
 (1390, 'Instance CPU utilization is high',                         60, 'https://aka.ms/sqldbtipswiki#1390')
 ;
 
@@ -1843,7 +1843,7 @@ SELECT query_hash,
        CONCAT(
              wait_category_desc,
              ' (', 
-             CAST(CAST(total_query_wait_time_ms * 1. / SUM(total_query_wait_time_ms) OVER (PARTITION BY query_hash) AS decimal(3,2)) AS varchar(4)),
+             CAST(CAST(total_query_wait_time_ms * 1. / SUM(total_query_wait_time_ms) OVER (PARTITION BY query_hash) AS decimal(4,3)) AS varchar(5)),
              ')'
              ) AS wait_category_desc -- append relative wait weight to category name
 FROM query_wait_stats
@@ -1871,9 +1871,9 @@ query_runtime_stats AS
 (
 SELECT q.query_hash,
        COUNT(DISTINCT(q.query_id)) AS count_queries,
-       MIN(q.query_id) AS query_id,
+       MAX(q.query_id) AS query_id,
        COUNT(DISTINCT(p.plan_id)) AS count_plans,
-       MIN(p.plan_id) AS plan_id,
+       MAX(p.plan_id) AS plan_id,
        SUM(IIF(rs.execution_type_desc = 'Regular', rs.count_executions, 0)) AS count_regular_executions,
        SUM(IIF(rs.execution_type_desc = 'Aborted', rs.count_executions, 0)) AS count_aborted_executions,
        SUM(IIF(rs.execution_type_desc = 'Exception', rs.count_executions, 0)) AS count_exception_executions,
@@ -1906,9 +1906,9 @@ query_rank AS
 (
 SELECT rs.query_hash,
        rs.count_queries,
-       IIF(rs.count_queries = 1, rs.query_id, NULL) AS query_id,
+       rs.query_id,
        rs.count_plans,
-       IIF(rs.count_plans = 1, rs.plan_id, NULL) AS plan_id,
+       rs.plan_id,
        rs.count_regular_executions,
        rs.count_aborted_executions,
        rs.count_exception_executions,
@@ -2013,16 +2013,16 @@ SELECT 1320 AS tip_id,
              STRING_AGG(
                        CAST(CONCAT(
                                   'query hash: ', CONVERT(varchar(30), query_hash, 1),
-                                  ', ranks: (CPU time: ', CAST(cpu_time_rank AS varchar(11)),
-                                  ', duration: ', CAST(duration_rank AS varchar(11)),
-                                  ', executions: ', CAST(executions_rank AS varchar(11)),
-                                  ', logical IO reads: ', CAST(logical_io_reads_rank AS varchar(11)),
-                                  ', max used memory: ', CAST(total_query_max_used_memory_rank AS varchar(11)),
-                                  ', log bytes used: ', CAST(total_log_bytes_used_rank AS varchar(11)),
-                                  ', tempdb used: ', CAST(total_tempdb_space_used_rank AS varchar(11)),
-                                  ', parallelism: ', CAST(total_dop_rank AS varchar(11)), ')',
-                                  ', query_id: ', IIF(query_id IS NOT NULL, CAST(query_id AS varchar(11)), CONCAT('multiple (', CAST(count_queries AS varchar(11)), ')')),
-                                  ', plan_id: ', IIF(plan_id IS NOT NULL, CAST(plan_id AS varchar(11)), CONCAT('multiple (', CAST(count_plans AS varchar(11)), ')')),
+                                  ', query_id: ', CAST(query_id AS varchar(11)), IIF(count_queries > 1, CONCAT(' (+', CAST(count_queries - 1 AS varchar(11)), ')'), ''),
+                                  ', plan_id: ', CAST(plan_id AS varchar(11)), IIF(count_plans > 1, CONCAT(' (+', CAST(count_plans - 1 AS varchar(11)), ')'), ''),
+                                  ', CPU time rank: ', CAST(cpu_time_rank AS varchar(11)),
+                                  ', duration rank: ', CAST(duration_rank AS varchar(11)),
+                                  ', executions rank: ', CAST(executions_rank AS varchar(11)),
+                                  ', logical IO reads rank: ', CAST(logical_io_reads_rank AS varchar(11)),
+                                  ', max used memory rank: ', CAST(total_query_max_used_memory_rank AS varchar(11)),
+                                  ', log bytes used rank: ', CAST(total_log_bytes_used_rank AS varchar(11)),
+                                  ', tempdb used rank: ', CAST(total_tempdb_space_used_rank AS varchar(11)),
+                                  ', parallelism rank: ', CAST(total_dop_rank AS varchar(11)),
                                   ', executions: (regular: ', CAST(count_regular_executions AS varchar(11)), ', aborted: ', CAST(count_aborted_executions AS varchar(11)), ', exception: ', CAST(count_exception_executions AS varchar(11)), ')',
                                   ', weighted wait categories: ', ISNULL(ranked_wait_categories, '-')
                                   ) AS nvarchar(max)), @CRLF
@@ -2427,7 +2427,7 @@ IF @JSONOutput = 0
     SELECT td.tip_id,
            td.tip_name AS description,
            td.confidence_percent,
-           td.tip_url AS URL,
+           td.tip_url AS additional_info_url,
            d.details
     FROM @TipDefinition AS td
     LEFT JOIN @DetectedTip AS dt
@@ -2447,7 +2447,7 @@ ELSE IF @JSONOutput = 1
     SELECT td.tip_id,
            td.tip_name AS description,
            td.confidence_percent,
-           td.tip_url AS URL,
+           td.tip_url AS additional_info_url,
            REPLACE(REPLACE(dt.details, CHAR(13), ''), NCHAR(160), '') AS details -- strip extra formatting
     FROM @TipDefinition AS td
     LEFT JOIN @DetectedTip AS dt
