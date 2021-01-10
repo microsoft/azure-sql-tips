@@ -2,7 +2,7 @@
 Returns a set of tips to improve database design, health, and performance in Azure SQL Database.
 For a detailed description and the latest version of the script, see https://aka.ms/sqldbtips
 
-v20210108.1
+v20210110.1
 */
 
 -- Set to 1 to output tips as a JSON value
@@ -201,48 +201,48 @@ IF DB_NAME() = 'master' AND @EngineEdition = 5
 -- Define all tips
 INSERT INTO @TipDefinition (tip_id, tip_name, confidence_percent, tip_url)
 VALUES
-(1000, 'Reduce MAXDOP on all replicas',                            90, 'https://aka.ms/sqldbtipswiki#1000'),
-(1010, 'Reduce MAXDOP on primary',                                 90, 'https://aka.ms/sqldbtipswiki#1010'),
-(1020, 'Reduce MAXDOP on secondaries',                             90, 'https://aka.ms/sqldbtipswiki#1020'),
-(1030, 'Use the latest database compatibility level',              70, 'https://aka.ms/sqldbtipswiki#1030'),
-(1040, 'Enable auto-create statistics',                            95, 'https://aka.ms/sqldbtipswiki#1040'),
-(1050, 'Enable auto-update statistics',                            95, 'https://aka.ms/sqldbtipswiki#1050'),
-(1060, 'Enable RCSI',                                              80, 'https://aka.ms/sqldbtipswiki#1060'),
-(1070, 'Enable Query Store',                                       90, 'https://aka.ms/sqldbtipswiki#1070'),
-(1071, 'Change Query Store operation mode to read-write',          90, 'https://aka.ms/sqldbtipswiki#1071'),
-(1072, 'Change Query Store capture mode from NONE to AUTO/ALL',    90, 'https://aka.ms/sqldbtipswiki#1072'),
-(1080, 'Disable AUTO_SHRINK',                                      99, 'https://aka.ms/sqldbtipswiki#1080'),
-(1100, 'Avoid GUID leading columns in btree indexes',              60, 'https://aka.ms/sqldbtipswiki#1100'),
-(1110, 'Enable FLGP auto-tuning',                                  95, 'https://aka.ms/sqldbtipswiki#1110'),
-(1120, 'Used data size is close to MAXSIZE',                       80, 'https://aka.ms/sqldbtipswiki#1120'),
-(1130, 'Allocated data size is close to MAXSIZE',                  60, 'https://aka.ms/sqldbtipswiki#1130'),
-(1140, 'Allocated data size is much larger than used data size',   50, 'https://aka.ms/sqldbtipswiki#1140'),
-(1150, 'Recent CPU throttling found',                              90, 'https://aka.ms/sqldbtipswiki#1150'),
-(1160, 'Recent out of memory errors found',                        80, 'https://aka.ms/sqldbtipswiki#1160'),
-(1165, 'Recent memory grant waits and timeouts found',             70, 'https://aka.ms/sqldbtipswiki#1165'),
-(1170, 'Nonclustered indexes with low reads found',                60, 'https://aka.ms/sqldbtipswiki#1170'),
-(1180, 'ROW or PAGE compression opportunities may exist',          65, 'https://aka.ms/sqldbtipswiki#1180'),
-(1190, 'Transaction log IO is close to limit',                     70, 'https://aka.ms/sqldbtipswiki#1190'),
-(1200, 'Plan cache is bloated by single-use plans',                90, 'https://aka.ms/sqldbtipswiki#1200'),
-(1210, 'Missing indexes may be impacting performance',             70, 'https://aka.ms/sqldbtipswiki#1210'),
-(1220, 'Redo queue or a secondary replica is large',               60, 'https://aka.ms/sqldbtipswiki#1220'),
-(1230, 'Data IOPS are close to workload group limit',              70, 'https://aka.ms/sqldbtipswiki#1230'),
-(1240, 'Workload group IO governance impact is significant',       40, 'https://aka.ms/sqldbtipswiki#1240'),
-(1250, 'Data IOPS are close to resource pool limit',               70, 'https://aka.ms/sqldbtipswiki#1250'),
-(1260, 'Resouce pool IO governance impact is significant',         40, 'https://aka.ms/sqldbtipswiki#1260'),
-(1270, 'Persistent Version Store size is large',                   70, 'https://aka.ms/sqldbtipswiki#1270'),
-(1280, 'Paused resumable index operations found',                  90, 'https://aka.ms/sqldbtipswiki#1280'),
-(1290, 'Clustered columnstore candidates found',                   50, 'https://aka.ms/sqldbtipswiki#1290'),
-(1300, 'Geo-replication state may be unhealthy',                   70, 'https://aka.ms/sqldbtipswiki#1300'),
-(1310, 'Last partitions are not empty',                            80, 'https://aka.ms/sqldbtipswiki#1310'),
-(1320, 'Top queries should be investigated and tuned',             90, 'https://aka.ms/sqldbtipswiki#1320'),
-(1330, 'Tempdb data allocated size is close to MAXSIZE',           70, 'https://aka.ms/sqldbtipswiki#1330'),
-(1340, 'Tempdb data used size is close to MAXSIZE',                95, 'https://aka.ms/sqldbtipswiki#1340'),
-(1350, 'Tempdb log allocated size is close to MAXSIZE',            80, 'https://aka.ms/sqldbtipswiki#1350'),
-(1360, 'Worker utilization is close to workload group limit',      80, 'https://aka.ms/sqldbtipswiki#1360'),
-(1370, 'Worker utilization is close to resource pool limit',       80, 'https://aka.ms/sqldbtipswiki#1370'),
-(1380, 'Notable network connectivity events found',                30, 'https://aka.ms/sqldbtipswiki#1380'),
-(1390, 'Instance CPU utilization is high',                         60, 'https://aka.ms/sqldbtipswiki#1390')
+(1000, 'Reduce MAXDOP on all replicas',                            90, 'https://aka.ms/sqldbtipswiki#tip_id-1000'),
+(1010, 'Reduce MAXDOP on primary',                                 90, 'https://aka.ms/sqldbtipswiki#tip_id-1010'),
+(1020, 'Reduce MAXDOP on secondaries',                             90, 'https://aka.ms/sqldbtipswiki#tip_id-1020'),
+(1030, 'Use the latest database compatibility level',              70, 'https://aka.ms/sqldbtipswiki#tip_id-1030'),
+(1040, 'Enable auto-create statistics',                            95, 'https://aka.ms/sqldbtipswiki#tip_id-1040'),
+(1050, 'Enable auto-update statistics',                            95, 'https://aka.ms/sqldbtipswiki#tip_id-1050'),
+(1060, 'Enable RCSI',                                              80, 'https://aka.ms/sqldbtipswiki#tip_id-1060'),
+(1070, 'Enable Query Store',                                       90, 'https://aka.ms/sqldbtipswiki#tip_id-1070'),
+(1071, 'Change Query Store operation mode to read-write',          90, 'https://aka.ms/sqldbtipswiki#tip_id-1071'),
+(1072, 'Change Query Store capture mode from NONE to AUTO/ALL',    90, 'https://aka.ms/sqldbtipswiki#tip_id-1072'),
+(1080, 'Disable AUTO_SHRINK',                                      99, 'https://aka.ms/sqldbtipswiki#tip_id-1080'),
+(1100, 'Avoid GUID leading columns in btree indexes',              60, 'https://aka.ms/sqldbtipswiki#tip_id-1100'),
+(1110, 'Enable FLGP auto-tuning',                                  95, 'https://aka.ms/sqldbtipswiki#tip_id-1110'),
+(1120, 'Used data size is close to MAXSIZE',                       80, 'https://aka.ms/sqldbtipswiki#tip_id-1120'),
+(1130, 'Allocated data size is close to MAXSIZE',                  60, 'https://aka.ms/sqldbtipswiki#tip_id-1130'),
+(1140, 'Allocated data size is much larger than used data size',   50, 'https://aka.ms/sqldbtipswiki#tip_id-1140'),
+(1150, 'Recent CPU throttling found',                              90, 'https://aka.ms/sqldbtipswiki#tip_id-1150'),
+(1160, 'Recent out of memory errors found',                        80, 'https://aka.ms/sqldbtipswiki#tip_id-1160'),
+(1165, 'Recent memory grant waits and timeouts found',             70, 'https://aka.ms/sqldbtipswiki#tip_id-1165'),
+(1170, 'Nonclustered indexes with low reads found',                60, 'https://aka.ms/sqldbtipswiki#tip_id-1170'),
+(1180, 'ROW or PAGE compression opportunities may exist',          65, 'https://aka.ms/sqldbtipswiki#tip_id-1180'),
+(1190, 'Transaction log IO is close to limit',                     70, 'https://aka.ms/sqldbtipswiki#tip_id-1190'),
+(1200, 'Plan cache is bloated by single-use plans',                90, 'https://aka.ms/sqldbtipswiki#tip_id-1200'),
+(1210, 'Missing indexes may be impacting performance',             70, 'https://aka.ms/sqldbtipswiki#tip_id-1210'),
+(1220, 'Redo queue or a secondary replica is large',               60, 'https://aka.ms/sqldbtipswiki#tip_id-1220'),
+(1230, 'Data IOPS are close to workload group limit',              70, 'https://aka.ms/sqldbtipswiki#tip_id-1230'),
+(1240, 'Workload group IO governance impact is significant',       40, 'https://aka.ms/sqldbtipswiki#tip_id-1240'),
+(1250, 'Data IOPS are close to resource pool limit',               70, 'https://aka.ms/sqldbtipswiki#tip_id-1250'),
+(1260, 'Resouce pool IO governance impact is significant',         40, 'https://aka.ms/sqldbtipswiki#tip_id-1260'),
+(1270, 'Persistent Version Store size is large',                   70, 'https://aka.ms/sqldbtipswiki#tip_id-1270'),
+(1280, 'Paused resumable index operations found',                  90, 'https://aka.ms/sqldbtipswiki#tip_id-1280'),
+(1290, 'Clustered columnstore candidates found',                   50, 'https://aka.ms/sqldbtipswiki#tip_id-1290'),
+(1300, 'Geo-replication state may be unhealthy',                   70, 'https://aka.ms/sqldbtipswiki#tip_id-1300'),
+(1310, 'Last partitions are not empty',                            80, 'https://aka.ms/sqldbtipswiki#tip_id-1310'),
+(1320, 'Top queries should be investigated and tuned',             90, 'https://aka.ms/sqldbtipswiki#tip_id-1320'),
+(1330, 'Tempdb data allocated size is close to MAXSIZE',           70, 'https://aka.ms/sqldbtipswiki#tip_id-1330'),
+(1340, 'Tempdb data used size is close to MAXSIZE',                95, 'https://aka.ms/sqldbtipswiki#tip_id-1340'),
+(1350, 'Tempdb log allocated size is close to MAXSIZE',            80, 'https://aka.ms/sqldbtipswiki#tip_id-1350'),
+(1360, 'Worker utilization is close to workload group limit',      80, 'https://aka.ms/sqldbtipswiki#tip_id-1360'),
+(1370, 'Worker utilization is close to resource pool limit',       80, 'https://aka.ms/sqldbtipswiki#tip_id-1370'),
+(1380, 'Notable network connectivity events found',                30, 'https://aka.ms/sqldbtipswiki#tip_id-1380'),
+(1390, 'Instance CPU utilization is high',                         60, 'https://aka.ms/sqldbtipswiki#tip_id-1390')
 ;
 
 -- MAXDOP
@@ -1881,6 +1881,7 @@ SELECT q.query_hash,
        SUM(rs.avg_cpu_time * rs.count_executions) AS total_cpu_time,
        SUM(rs.avg_duration * rs.count_executions) AS total_duration,
        SUM(rs.avg_logical_io_reads * rs.count_executions) AS total_logical_io_reads,
+       SUM(rs.avg_physical_io_reads * rs.count_executions) AS total_physical_io_reads,
        SUM(rs.avg_query_max_used_memory * rs.count_executions) AS total_query_max_used_memory,
        SUM(rs.avg_log_bytes_used * rs.count_executions) AS total_log_bytes_used,
        SUM(rs.avg_tempdb_space_used * rs.count_executions) AS total_tempdb_space_used,
@@ -1915,6 +1916,7 @@ SELECT rs.query_hash,
        ROW_NUMBER() OVER (ORDER BY rs.total_cpu_time DESC) AS cpu_time_rank,
        ROW_NUMBER() OVER (ORDER BY rs.total_duration DESC) AS duration_rank,
        ROW_NUMBER() OVER (ORDER BY rs.total_logical_io_reads DESC) AS logical_io_reads_rank,
+       ROW_NUMBER() OVER (ORDER BY rs.total_physical_io_reads DESC) AS physical_io_reads_rank,
        ROW_NUMBER() OVER (ORDER BY rs.count_executions DESC) AS executions_rank,
        ROW_NUMBER() OVER (ORDER BY rs.total_query_max_used_memory DESC) AS total_query_max_used_memory_rank,
        ROW_NUMBER() OVER (ORDER BY rs.total_log_bytes_used DESC) AS total_log_bytes_used_rank,
@@ -1925,6 +1927,7 @@ SELECT rs.query_hash,
        IIF(rs.total_cpu_time * 1. / NULLIF(LEAD(rs.total_cpu_time) OVER (ORDER BY rs.total_cpu_time), 0) < 0.5, 1, 0) AS top_cpu_cutoff_indicator,
        IIF(rs.total_duration * 1. / NULLIF(LEAD(rs.total_duration) OVER (ORDER BY rs.total_duration), 0) < 0.5, 1, 0) AS top_duration_cutoff_indicator,
        IIF(rs.total_logical_io_reads * 1. / NULLIF(LEAD(rs.total_logical_io_reads) OVER (ORDER BY rs.total_logical_io_reads), 0) < 0.5, 1, 0) AS top_logical_io_reads_cutoff_indicator,
+       IIF(rs.total_physical_io_reads * 1. / NULLIF(LEAD(rs.total_physical_io_reads) OVER (ORDER BY rs.total_physical_io_reads), 0) < 0.5, 1, 0) AS top_physical_io_reads_cutoff_indicator,
        IIF(rs.count_executions * 1. / NULLIF(LEAD(rs.count_executions) OVER (ORDER BY rs.count_executions), 0) < 0.5, 1, 0) AS top_executions_cutoff_indicator,
        IIF(rs.total_query_max_used_memory * 1. / NULLIF(LEAD(rs.total_query_max_used_memory) OVER (ORDER BY rs.total_query_max_used_memory), 0) < 0.5, 1, 0) AS top_memory_cutoff_indicator,
        IIF(rs.total_log_bytes_used * 1. / NULLIF(LEAD(rs.total_log_bytes_used) OVER (ORDER BY rs.total_log_bytes_used), 0) < 0.5, 1, 0) AS top_log_bytes_cutoff_indicator,
@@ -1942,6 +1945,7 @@ SELECT *,
        SUM(top_cpu_cutoff_indicator) OVER (ORDER BY cpu_time_rank ROWS UNBOUNDED PRECEDING) AS top_cpu_indicator,
        SUM(top_duration_cutoff_indicator) OVER (ORDER BY duration_rank ROWS UNBOUNDED PRECEDING) AS top_duration_indicator,
        SUM(top_logical_io_reads_cutoff_indicator) OVER (ORDER BY logical_io_reads_rank ROWS UNBOUNDED PRECEDING) AS top_logical_io_indicator,
+       SUM(top_physical_io_reads_cutoff_indicator) OVER (ORDER BY physical_io_reads_rank ROWS UNBOUNDED PRECEDING) AS top_physical_io_indicator,
        SUM(top_executions_cutoff_indicator) OVER (ORDER BY executions_rank ROWS UNBOUNDED PRECEDING) AS top_executions_indicator,
        SUM(top_memory_cutoff_indicator) OVER (ORDER BY total_query_max_used_memory_rank ROWS UNBOUNDED PRECEDING) AS top_memory_indicator,
        SUM(top_log_bytes_cutoff_indicator) OVER (ORDER BY total_log_bytes_used_rank ROWS UNBOUNDED PRECEDING) AS top_log_bytes_indicator,
@@ -1963,6 +1967,7 @@ SELECT query_hash,
        cpu_time_rank,
        duration_rank,
        logical_io_reads_rank,
+       physical_io_reads_rank,
        executions_rank,
        total_query_max_used_memory_rank,
        total_log_bytes_used_rank,
@@ -1978,6 +1983,8 @@ WHERE (
       top_executions_indicator = 0
       OR
       top_logical_io_indicator = 0
+      OR
+      top_physical_io_indicator = 0
       OR
       top_memory_indicator = 0
       OR
@@ -1996,6 +2003,8 @@ WHERE (
       executions_rank <= @QueryStoreTopQueryCount
       OR
       logical_io_reads_rank <= @QueryStoreTopQueryCount
+      OR
+      physical_io_reads_rank <= @QueryStoreTopQueryCount
       OR
       total_query_max_used_memory_rank <= @QueryStoreTopQueryCount
       OR
@@ -2019,6 +2028,7 @@ SELECT 1320 AS tip_id,
                                   ', duration rank: ', CAST(duration_rank AS varchar(11)),
                                   ', executions rank: ', CAST(executions_rank AS varchar(11)),
                                   ', logical IO reads rank: ', CAST(logical_io_reads_rank AS varchar(11)),
+                                  ', physical IO reads rank: ', CAST(physical_io_reads_rank AS varchar(11)),
                                   ', max used memory rank: ', CAST(total_query_max_used_memory_rank AS varchar(11)),
                                   ', log bytes used rank: ', CAST(total_log_bytes_used_rank AS varchar(11)),
                                   ', tempdb used rank: ', CAST(total_tempdb_space_used_rank AS varchar(11)),
