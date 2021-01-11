@@ -2,7 +2,7 @@
 Returns a set of tips to improve database design, health, and performance in Azure SQL Database.
 For a detailed description and the latest version of the script, see https://aka.ms/sqldbtips
 
-v20210110.1
+v20210111.1
 */
 
 -- Set to 1 to output tips as a JSON value
@@ -1015,6 +1015,7 @@ WHERE mia.details IS NOT NULL
 ;
 
 -- Redo queue is large
+-- Applicable to Premium/Business Critical read scale-out replicas and all non-Hyperscale geo-replicas
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1220 AS tip_id,
        CONCAT(
@@ -1028,9 +1029,7 @@ SELECT 1220 AS tip_id,
              )
        AS details
 FROM sys.dm_database_replica_states
-WHERE DATABASEPROPERTYEX(DB_NAME(), 'Edition') IN ('Premium','BusinessCritical')
-      AND
-      is_primary_replica = 0 -- redo details only available on secondary
+WHERE is_primary_replica = 0 -- redo details only available on secondary
       AND
       is_local = 1
       AND
