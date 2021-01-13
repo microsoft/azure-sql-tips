@@ -2,7 +2,7 @@
 Returns a set of tips to improve database design, health, and performance in Azure SQL Database.
 For a detailed description and the latest version of the script, see https://aka.ms/sqldbtips
 
-v20210111.1
+v20210112.1
 */
 
 -- Set to 1 to output tips as a JSON value
@@ -138,7 +138,7 @@ DECLARE
 @HighPoolWorkerUtilizationThresholdRatio decimal(3,2) = 0.7,
 
 -- 1380: The length of recent time interval to use when filtering network connectivity ring buffer events
-@NotableNetworkEventsIntervalMinutes int = 60,
+@NotableNetworkEventsIntervalMinutes int = 120,
 
 -- 1380: Minimum duration of login considered too long
 @NotableNetworkEventsSlowLoginThresholdMs int = 5000,
@@ -1493,9 +1493,9 @@ SELECT 1270 AS tip_id,
              'PVS size (GB): ', FORMAT(persistent_version_store_size_gb, 'N'), @CRLF,
              'online index version store size (GB): ', FORMAT(online_index_version_store_size_gb, 'N'), @CRLF,
              'current aborted transaction count: ', FORMAT(current_aborted_transaction_count, '#,0'), @CRLF,
-             'aborted transaction version cleaner start time: ', ISNULL(CONVERT(varchar(20), aborted_version_cleaner_start_time, 120), '-'), @CRLF,
-             'aborted transaction version cleaner end time: ', ISNULL(CONVERT(varchar(20), aborted_version_cleaner_end_time, 120), '-'), @CRLF,
-             'oldest transaction begin time: ',  ISNULL(CONVERT(varchar(30), oldest_transaction_begin_time, 121), '-'), @CRLF,
+             'aborted transaction version cleaner start time (UTC): ', ISNULL(CONVERT(varchar(20), aborted_version_cleaner_start_time, 120), '-'), @CRLF,
+             'aborted transaction version cleaner end time (UTC): ', ISNULL(CONVERT(varchar(20), aborted_version_cleaner_end_time, 120), '-'), @CRLF,
+             'oldest transaction begin time (UTC): ',  ISNULL(CONVERT(varchar(30), oldest_transaction_begin_time, 121), '-'), @CRLF,
              'active transaction session_id: ', ISNULL(CAST(active_transaction_session_id AS varchar(11)), '-'), @CRLF,
              'active transaction elapsed time (seconds): ', ISNULL(CAST(active_transaction_elapsed_time_seconds AS varchar(11)), '-'),
              @CRLF
@@ -1793,16 +1793,6 @@ HAVING COUNT(1) > 0
 ;
 
 -- Top queries
-DECLARE @QDSTimeStart datetimeoffset,
-        @QDSTimeEnd datetimeoffset;
-
-IF (@QueryStoreCustomTimeStart IS NULL OR @QueryStoreCustomTimeEnd IS NULL) AND @QueryStoreIntervalMinutes IS NOT NULL
-    SELECT @QDSTimeStart = DATEADD(minute, -@QueryStoreIntervalMinutes, SYSDATETIMEOFFSET()),
-           @QDSTimeEnd = SYSDATETIMEOFFSET();
-ELSE IF @QueryStoreCustomTimeStart IS NOT NULL AND @QueryStoreCustomTimeEnd IS NOT NULL
-    SELECT @QDSTimeStart = @QueryStoreCustomTimeStart,
-           @QDSTimeEnd = @QueryStoreCustomTimeEnd;
-
 DROP TABLE IF EXISTS #query_wait_stats_summary;
 
 CREATE TABLE #query_wait_stats_summary
@@ -1829,9 +1819,17 @@ WHERE q.is_internal_query = 0
       AND
       q.is_clouddb_internal_query = 0
       AND
-      rsi.start_time >= @QDSTimeStart
+      rsi.start_time >= IIF(
+                           (@QueryStoreCustomTimeStart IS NULL OR @QueryStoreCustomTimeEnd IS NULL) AND @QueryStoreIntervalMinutes IS NOT NULL,
+                           DATEADD(minute, -@QueryStoreIntervalMinutes, SYSDATETIMEOFFSET()),
+                           @QueryStoreCustomTimeStart
+                           )
       AND
-      rsi.start_time <= @QDSTimeEnd
+      rsi.start_time <= IIF(
+                           (@QueryStoreCustomTimeStart IS NULL OR @QueryStoreCustomTimeEnd IS NULL) AND @QueryStoreIntervalMinutes IS NOT NULL,
+                           SYSDATETIMEOFFSET(),
+                           @QueryStoreCustomTimeEnd
+                           )
 GROUP BY q.query_hash,
          ws.wait_category_desc
 ),
@@ -1896,9 +1894,17 @@ WHERE q.is_internal_query = 0
       AND
       q.is_clouddb_internal_query = 0
       AND
-      rsi.start_time >= @QDSTimeStart
+      rsi.start_time >= IIF(
+                           (@QueryStoreCustomTimeStart IS NULL OR @QueryStoreCustomTimeEnd IS NULL) AND @QueryStoreIntervalMinutes IS NOT NULL,
+                           DATEADD(minute, -@QueryStoreIntervalMinutes, SYSDATETIMEOFFSET()),
+                           @QueryStoreCustomTimeStart
+                           )
       AND
-      rsi.start_time <= @QDSTimeEnd
+      rsi.start_time <= IIF(
+                           (@QueryStoreCustomTimeStart IS NULL OR @QueryStoreCustomTimeEnd IS NULL) AND @QueryStoreIntervalMinutes IS NOT NULL,
+                           SYSDATETIMEOFFSET(),
+                           @QueryStoreCustomTimeEnd
+                           )
 GROUP BY q.query_hash
 ),
 -- rank queries along multiple dimensions (cpu, duration, etc.), without ties
@@ -2023,6 +2029,7 @@ SELECT 1320 AS tip_id,
                                   'query hash: ', CONVERT(varchar(30), query_hash, 1),
                                   ', query_id: ', CAST(query_id AS varchar(11)), IIF(count_queries > 1, CONCAT(' (+', CAST(count_queries - 1 AS varchar(11)), ')'), ''),
                                   ', plan_id: ', CAST(plan_id AS varchar(11)), IIF(count_plans > 1, CONCAT(' (+', CAST(count_plans - 1 AS varchar(11)), ')'), ''),
+                                  ', executions: (regular: ', CAST(count_regular_executions AS varchar(11)), ', aborted: ', CAST(count_aborted_executions AS varchar(11)), ', exception: ', CAST(count_exception_executions AS varchar(11)), ')',
                                   ', CPU time rank: ', CAST(cpu_time_rank AS varchar(11)),
                                   ', duration rank: ', CAST(duration_rank AS varchar(11)),
                                   ', executions rank: ', CAST(executions_rank AS varchar(11)),
@@ -2032,7 +2039,6 @@ SELECT 1320 AS tip_id,
                                   ', log bytes used rank: ', CAST(total_log_bytes_used_rank AS varchar(11)),
                                   ', tempdb used rank: ', CAST(total_tempdb_space_used_rank AS varchar(11)),
                                   ', parallelism rank: ', CAST(total_dop_rank AS varchar(11)),
-                                  ', executions: (regular: ', CAST(count_regular_executions AS varchar(11)), ', aborted: ', CAST(count_aborted_executions AS varchar(11)), ', exception: ', CAST(count_exception_executions AS varchar(11)), ')',
                                   ', weighted wait categories: ', ISNULL(ranked_wait_categories, '-')
                                   ) AS nvarchar(max)), @CRLF
                        )
@@ -2366,15 +2372,24 @@ WHERE sce.event_time > DATEADD(minute, -@NotableNetworkEventsIntervalMinutes, CU
 ;
 
 IF @@ROWCOUNT > 0
+BEGIN
     INSERT INTO @DetectedTip (tip_id, details)
     SELECT 1380 AS tip_id, 
            CONCAT(
                  @NbspCRLF,
                  'In the last ', FORMAT(@NotableNetworkEventsIntervalMinutes, '#,0'), 
                  ' minutes, notable network connectivity events have occurred. For details, execute this query in the same database:', @CRLF, 
-                 'SELECT * FROM ##tips_connectivity_event ORDER BY event_time DESC;',
+                 'SELECT event_age, * FROM ##tips_connectivity_event ORDER BY event_time DESC;',
                  @CRLF
                  ) AS details;
+
+    ALTER TABLE ##tips_connectivity_event
+    ADD event_age AS CONCAT(
+                           DATEDIFF(second, event_time, CURRENT_TIMESTAMP) / 3600, ' h, ', 
+                           (DATEDIFF(second, event_time, CURRENT_TIMESTAMP) % 3600) / 60, ' m, ', 
+                           DATEDIFF(second, event_time, CURRENT_TIMESTAMP) % 60, ' s'
+                           );
+END;
 
 -- High instance CPU
 WITH
