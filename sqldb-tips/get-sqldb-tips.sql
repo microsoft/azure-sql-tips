@@ -2,7 +2,7 @@
 Returns a set of tips to improve database design, health, and performance in Azure SQL Database.
 For a detailed description and the latest version of the script, see https://aka.ms/sqldbtips
 
-v20210112.1
+v20210113.1
 */
 
 -- Set to 1 to output tips as a JSON value
@@ -2067,11 +2067,23 @@ index_size varchar(18) NULL,
 unused varchar(18) NULL
 );
 
-INSERT INTO #tempdb_space_used
-EXEC tempdb.sys.sp_spaceused @oneresultset = 1;
+-- When not running as server admin and without membership in ##MS_ServerStateReader## we do not have
+-- VIEW DATABASE STATE on tempdb, which is required to execute tempdb.sys.sp_spaceused to determine tempdb used space.
+-- Silently skipping tip 1340 (tempdb used space) in that case.
+IF EXISTS (
+          SELECT 1
+          FROM tempdb.sys.fn_my_permissions(default, 'DATABASE')
+          WHERE entity_name = 'database'
+                AND
+                permission_name = 'VIEW DATABASE STATE'
+          )
+BEGIN
+    INSERT INTO #tempdb_space_used
+    EXEC tempdb.sys.sp_spaceused @oneresultset = 1;
 
-IF @@ROWCOUNT <> 1
-    THROW 50020, 'tempdb.sys.sp_spaceused returned the number of rows other than 1.', 1;
+    IF @@ROWCOUNT <> 1
+        THROW 50020, 'tempdb.sys.sp_spaceused returned the number of rows other than 1.', 1;
+END;
 
 WITH tempdb_file_size AS
 (
