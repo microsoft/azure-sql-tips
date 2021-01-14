@@ -2,7 +2,7 @@
 
 You can execute the `get-sqldb-tips.sql` script to get tips to improve database design, health, and performance in [Azure SQL Database](https://azure.microsoft.com/services/sql-database/). Download the latest released version of the script from [releases](../../releases), under Assets.
 
-See [Azure SQL Database tips](../../wiki/Azure-SQL-Database-tips) wiki for a detailed description. For answers to common questions, see [FAQ](../../wiki/FAQ).
+To learn how to use it, start here: [Azure SQL Database tips](../../wiki/Azure-SQL-Database-tips). Then, for answers to common questions, see [FAQ](../../wiki/FAQ).
 
 The script is maintained by the Azure SQL PM team. Feedback and contributions from the community are welcome and encouraged.
 
