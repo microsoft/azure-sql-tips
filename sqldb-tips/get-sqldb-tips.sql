@@ -2,7 +2,7 @@
 Returns a set of tips to improve database design, health, and performance in Azure SQL Database.
 For a detailed description and the latest version of the script, see https://aka.ms/sqldbtips
 
-v20210113.1
+v20210115.1
 */
 
 -- Set to 1 to output tips as a JSON value
@@ -147,7 +147,16 @@ DECLARE
 @HighInstanceCPUThresholdPercent decimal(5,2) = 90,
 
 -- 1390: Minimum duration of a high instance CPU period considered significant
-@HighInstanceCPUMinThresholdSeconds int = 300
+@HighInstanceCPUMinThresholdSeconds int = 300,
+
+-- 1400: Minimum change in object cardinality to be considered significant, expressed as a ratio of cardinality at last stats update to current cardinality
+@StaleStatsCardinalityChangeMinDifference decimal(3,2) = 0.5,
+
+-- 1400: The min ratio of mod count to object cardinality to be considered significant
+@StaleStatsMinModificationCountRatio decimal(3,2) = 0.1,
+
+-- 1400: The minimum number of days since last stats update to be considered significant
+@StaleStatsMinAgeThresholdDays smallint = 30
 ;
 
 DECLARE @ExecStartTime datetimeoffset = SYSDATETIMEOFFSET();
@@ -156,15 +165,18 @@ DECLARE @TipDefinition table (
                              tip_id smallint NOT NULL PRIMARY KEY,
                              tip_name nvarchar(60) NOT NULL UNIQUE,
                              confidence_percent decimal(3,0) NOT NULL CHECK (confidence_percent BETWEEN 0 AND 100),
-                             tip_url nvarchar(200) NOT NULL
+                             tip_url nvarchar(200) NOT NULL,
+                             required_permission varchar(50) NOT NULL
                              );
 DECLARE @DetectedTip table (
                            tip_id smallint NOT NULL PRIMARY KEY,
                            details nvarchar(max) NULL
                            );
 
-DECLARE @CRLF char(2) = CHAR(13) + CHAR(10);
-DECLARE @NbspCRLF nchar(3) = NCHAR(160) + NCHAR(13) + NCHAR(10);
+DECLARE @CRLF char(2) = CHAR(13) + CHAR(10),
+        @NbspCRLF nchar(3) = NCHAR(160) + NCHAR(13) + NCHAR(10);
+
+DECLARE @ViewServerStateIndicator bit = 1;
 
 SET NOCOUNT ON;
 SET LOCK_TIMEOUT 5000; -- abort if another request holds a lock on metadata for too long
@@ -199,50 +211,51 @@ IF DB_NAME() = 'master' AND @EngineEdition = 5
     THROW 50015, 'Execute this script in a user database, not in the ''master'' database.', 1;
 
 -- Define all tips
-INSERT INTO @TipDefinition (tip_id, tip_name, confidence_percent, tip_url)
+INSERT INTO @TipDefinition (tip_id, tip_name, confidence_percent, tip_url, required_permission)
 VALUES
-(1000, 'Reduce MAXDOP on all replicas',                            90, 'https://aka.ms/sqldbtipswiki#tip_id-1000'),
-(1010, 'Reduce MAXDOP on primary',                                 90, 'https://aka.ms/sqldbtipswiki#tip_id-1010'),
-(1020, 'Reduce MAXDOP on secondaries',                             90, 'https://aka.ms/sqldbtipswiki#tip_id-1020'),
-(1030, 'Use the latest database compatibility level',              70, 'https://aka.ms/sqldbtipswiki#tip_id-1030'),
-(1040, 'Enable auto-create statistics',                            95, 'https://aka.ms/sqldbtipswiki#tip_id-1040'),
-(1050, 'Enable auto-update statistics',                            95, 'https://aka.ms/sqldbtipswiki#tip_id-1050'),
-(1060, 'Enable RCSI',                                              80, 'https://aka.ms/sqldbtipswiki#tip_id-1060'),
-(1070, 'Enable Query Store',                                       90, 'https://aka.ms/sqldbtipswiki#tip_id-1070'),
-(1071, 'Change Query Store operation mode to read-write',          90, 'https://aka.ms/sqldbtipswiki#tip_id-1071'),
-(1072, 'Change Query Store capture mode from NONE to AUTO/ALL',    90, 'https://aka.ms/sqldbtipswiki#tip_id-1072'),
-(1080, 'Disable AUTO_SHRINK',                                      99, 'https://aka.ms/sqldbtipswiki#tip_id-1080'),
-(1100, 'Avoid GUID leading columns in btree indexes',              60, 'https://aka.ms/sqldbtipswiki#tip_id-1100'),
-(1110, 'Enable FLGP auto-tuning',                                  95, 'https://aka.ms/sqldbtipswiki#tip_id-1110'),
-(1120, 'Used data size is close to MAXSIZE',                       80, 'https://aka.ms/sqldbtipswiki#tip_id-1120'),
-(1130, 'Allocated data size is close to MAXSIZE',                  60, 'https://aka.ms/sqldbtipswiki#tip_id-1130'),
-(1140, 'Allocated data size is much larger than used data size',   50, 'https://aka.ms/sqldbtipswiki#tip_id-1140'),
-(1150, 'Recent CPU throttling found',                              90, 'https://aka.ms/sqldbtipswiki#tip_id-1150'),
-(1160, 'Recent out of memory errors found',                        80, 'https://aka.ms/sqldbtipswiki#tip_id-1160'),
-(1165, 'Recent memory grant waits and timeouts found',             70, 'https://aka.ms/sqldbtipswiki#tip_id-1165'),
-(1170, 'Nonclustered indexes with low reads found',                60, 'https://aka.ms/sqldbtipswiki#tip_id-1170'),
-(1180, 'ROW or PAGE compression opportunities may exist',          65, 'https://aka.ms/sqldbtipswiki#tip_id-1180'),
-(1190, 'Transaction log IO is close to limit',                     70, 'https://aka.ms/sqldbtipswiki#tip_id-1190'),
-(1200, 'Plan cache is bloated by single-use plans',                90, 'https://aka.ms/sqldbtipswiki#tip_id-1200'),
-(1210, 'Missing indexes may be impacting performance',             70, 'https://aka.ms/sqldbtipswiki#tip_id-1210'),
-(1220, 'Redo queue or a secondary replica is large',               60, 'https://aka.ms/sqldbtipswiki#tip_id-1220'),
-(1230, 'Data IOPS are close to workload group limit',              70, 'https://aka.ms/sqldbtipswiki#tip_id-1230'),
-(1240, 'Workload group IO governance impact is significant',       40, 'https://aka.ms/sqldbtipswiki#tip_id-1240'),
-(1250, 'Data IOPS are close to resource pool limit',               70, 'https://aka.ms/sqldbtipswiki#tip_id-1250'),
-(1260, 'Resouce pool IO governance impact is significant',         40, 'https://aka.ms/sqldbtipswiki#tip_id-1260'),
-(1270, 'Persistent Version Store size is large',                   70, 'https://aka.ms/sqldbtipswiki#tip_id-1270'),
-(1280, 'Paused resumable index operations found',                  90, 'https://aka.ms/sqldbtipswiki#tip_id-1280'),
-(1290, 'Clustered columnstore candidates found',                   50, 'https://aka.ms/sqldbtipswiki#tip_id-1290'),
-(1300, 'Geo-replication state may be unhealthy',                   70, 'https://aka.ms/sqldbtipswiki#tip_id-1300'),
-(1310, 'Last partitions are not empty',                            80, 'https://aka.ms/sqldbtipswiki#tip_id-1310'),
-(1320, 'Top queries should be investigated and tuned',             90, 'https://aka.ms/sqldbtipswiki#tip_id-1320'),
-(1330, 'Tempdb data allocated size is close to MAXSIZE',           70, 'https://aka.ms/sqldbtipswiki#tip_id-1330'),
-(1340, 'Tempdb data used size is close to MAXSIZE',                95, 'https://aka.ms/sqldbtipswiki#tip_id-1340'),
-(1350, 'Tempdb log allocated size is close to MAXSIZE',            80, 'https://aka.ms/sqldbtipswiki#tip_id-1350'),
-(1360, 'Worker utilization is close to workload group limit',      80, 'https://aka.ms/sqldbtipswiki#tip_id-1360'),
-(1370, 'Worker utilization is close to resource pool limit',       80, 'https://aka.ms/sqldbtipswiki#tip_id-1370'),
-(1380, 'Notable network connectivity events found',                30, 'https://aka.ms/sqldbtipswiki#tip_id-1380'),
-(1390, 'Instance CPU utilization is high',                         60, 'https://aka.ms/sqldbtipswiki#tip_id-1390')
+(1000, 'Reduce MAXDOP on all replicas',                            90, 'https://aka.ms/sqldbtipswiki#tip_id-1000', 'VIEW DATABASE STATE'),
+(1010, 'Reduce MAXDOP on primary',                                 90, 'https://aka.ms/sqldbtipswiki#tip_id-1010', 'VIEW DATABASE STATE'),
+(1020, 'Reduce MAXDOP on secondaries',                             90, 'https://aka.ms/sqldbtipswiki#tip_id-1020', 'VIEW DATABASE STATE'),
+(1030, 'Use the latest database compatibility level',              70, 'https://aka.ms/sqldbtipswiki#tip_id-1030', 'VIEW DATABASE STATE'),
+(1040, 'Enable auto-create statistics',                            95, 'https://aka.ms/sqldbtipswiki#tip_id-1040', 'VIEW DATABASE STATE'),
+(1050, 'Enable auto-update statistics',                            95, 'https://aka.ms/sqldbtipswiki#tip_id-1050', 'VIEW DATABASE STATE'),
+(1060, 'Enable RCSI',                                              80, 'https://aka.ms/sqldbtipswiki#tip_id-1060', 'VIEW DATABASE STATE'),
+(1070, 'Enable Query Store',                                       90, 'https://aka.ms/sqldbtipswiki#tip_id-1070', 'VIEW DATABASE STATE'),
+(1071, 'Change Query Store operation mode to read-write',          90, 'https://aka.ms/sqldbtipswiki#tip_id-1071', 'VIEW DATABASE STATE'),
+(1072, 'Change Query Store capture mode from NONE to AUTO/ALL',    90, 'https://aka.ms/sqldbtipswiki#tip_id-1072', 'VIEW DATABASE STATE'),
+(1080, 'Disable AUTO_SHRINK',                                      99, 'https://aka.ms/sqldbtipswiki#tip_id-1080', 'VIEW DATABASE STATE'),
+(1100, 'Avoid GUID leading columns in btree indexes',              60, 'https://aka.ms/sqldbtipswiki#tip_id-1100', 'VIEW DATABASE STATE'),
+(1110, 'Enable FLGP auto-tuning',                                  95, 'https://aka.ms/sqldbtipswiki#tip_id-1110', 'VIEW DATABASE STATE'),
+(1120, 'Used data size is close to MAXSIZE',                       80, 'https://aka.ms/sqldbtipswiki#tip_id-1120', 'VIEW DATABASE STATE'),
+(1130, 'Allocated data size is close to MAXSIZE',                  60, 'https://aka.ms/sqldbtipswiki#tip_id-1130', 'VIEW DATABASE STATE'),
+(1140, 'Allocated data size is much larger than used data size',   50, 'https://aka.ms/sqldbtipswiki#tip_id-1140', 'VIEW DATABASE STATE'),
+(1150, 'Recent CPU throttling found',                              90, 'https://aka.ms/sqldbtipswiki#tip_id-1150', 'VIEW SERVER STATE'),
+(1160, 'Recent out of memory errors found',                        80, 'https://aka.ms/sqldbtipswiki#tip_id-1160', 'VIEW SERVER STATE'),
+(1165, 'Recent memory grant waits and timeouts found',             70, 'https://aka.ms/sqldbtipswiki#tip_id-1165', 'VIEW SERVER STATE'),
+(1170, 'Nonclustered indexes with low reads found',                60, 'https://aka.ms/sqldbtipswiki#tip_id-1170', 'VIEW SERVER STATE'),
+(1180, 'ROW or PAGE compression opportunities may exist',          65, 'https://aka.ms/sqldbtipswiki#tip_id-1180', 'VIEW SERVER STATE'),
+(1190, 'Transaction log IO is close to limit',                     70, 'https://aka.ms/sqldbtipswiki#tip_id-1190', 'VIEW DATABASE STATE'),
+(1200, 'Plan cache is bloated by single-use plans',                90, 'https://aka.ms/sqldbtipswiki#tip_id-1200', 'VIEW DATABASE STATE'),
+(1210, 'Missing indexes may be impacting performance',             70, 'https://aka.ms/sqldbtipswiki#tip_id-1210', 'VIEW SERVER STATE'),
+(1220, 'Redo queue or a secondary replica is large',               60, 'https://aka.ms/sqldbtipswiki#tip_id-1220', 'VIEW DATABASE STATE'),
+(1230, 'Data IOPS are close to workload group limit',              70, 'https://aka.ms/sqldbtipswiki#tip_id-1230', 'VIEW SERVER STATE'),
+(1240, 'Workload group IO governance impact is significant',       40, 'https://aka.ms/sqldbtipswiki#tip_id-1240', 'VIEW SERVER STATE'),
+(1250, 'Data IOPS are close to resource pool limit',               70, 'https://aka.ms/sqldbtipswiki#tip_id-1250', 'VIEW SERVER STATE'),
+(1260, 'Resouce pool IO governance impact is significant',         40, 'https://aka.ms/sqldbtipswiki#tip_id-1260', 'VIEW SERVER STATE'),
+(1270, 'Persistent Version Store size is large',                   70, 'https://aka.ms/sqldbtipswiki#tip_id-1270', 'VIEW SERVER STATE'),
+(1280, 'Paused resumable index operations found',                  90, 'https://aka.ms/sqldbtipswiki#tip_id-1280', 'VIEW DATABASE STATE'),
+(1290, 'Clustered columnstore candidates found',                   50, 'https://aka.ms/sqldbtipswiki#tip_id-1290', 'VIEW SERVER STATE'),
+(1300, 'Geo-replication state may be unhealthy',                   70, 'https://aka.ms/sqldbtipswiki#tip_id-1300', 'VIEW DATABASE STATE'),
+(1310, 'Last partitions are not empty',                            80, 'https://aka.ms/sqldbtipswiki#tip_id-1310', 'VIEW DATABASE STATE'),
+(1320, 'Top queries should be investigated and tuned',             90, 'https://aka.ms/sqldbtipswiki#tip_id-1320', 'VIEW DATABASE STATE'),
+(1330, 'Tempdb data allocated size is close to MAXSIZE',           70, 'https://aka.ms/sqldbtipswiki#tip_id-1330', 'VIEW DATABASE STATE'),
+(1340, 'Tempdb data used size is close to MAXSIZE',                95, 'https://aka.ms/sqldbtipswiki#tip_id-1340', 'VIEW SERVER STATE'),
+(1350, 'Tempdb log allocated size is close to MAXSIZE',            80, 'https://aka.ms/sqldbtipswiki#tip_id-1350', 'VIEW DATABASE STATE'),
+(1360, 'Worker utilization is close to workload group limit',      80, 'https://aka.ms/sqldbtipswiki#tip_id-1360', 'VIEW SERVER STATE'),
+(1370, 'Worker utilization is close to resource pool limit',       80, 'https://aka.ms/sqldbtipswiki#tip_id-1370', 'VIEW SERVER STATE'),
+(1380, 'Notable network connectivity events found',                30, 'https://aka.ms/sqldbtipswiki#tip_id-1380', 'VIEW SERVER STATE'),
+(1390, 'Instance CPU utilization is high',                         60, 'https://aka.ms/sqldbtipswiki#tip_id-1390', 'VIEW DATABASE STATE'),
+(1400, 'Some statistics may be out of date',                       70, 'https://aka.ms/sqldbtipswiki#tip_id-1400', 'VIEW DATABASE STATE')
 ;
 
 -- MAXDOP
@@ -250,52 +263,61 @@ INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1000 AS tip_id,
        CONCAT(
              @NbspCRLF,
-             'MAXDOP for primary: ', CAST(value AS varchar(2)), @CRLF,
-             'MAXDOP for secondary: ', ISNULL(CAST(value_for_secondary AS varchar(4)), 'NULL'), @CRLF
+             'MAXDOP for primary: ', CAST(c.value AS varchar(2)), @CRLF,
+             'MAXDOP for secondary: ', ISNULL(CAST(c.value_for_secondary AS varchar(4)), 'NULL'), @CRLF
              )
        AS details
-FROM sys.database_scoped_configurations
-WHERE name = N'MAXDOP'
+FROM sys.database_scoped_configurations AS c
+CROSS JOIN sys.dm_user_db_resource_governance AS g
+WHERE c.name = N'MAXDOP'
       AND
-      value NOT BETWEEN 1 AND 8
+      c.value NOT BETWEEN 1 AND 8
       AND
-      (value_for_secondary IS NULL OR value_for_secondary NOT BETWEEN 1 AND 8)
+      (c.value_for_secondary IS NULL OR c.value_for_secondary NOT BETWEEN 1 AND 8)
       AND
-      (SELECT COUNT(1) FROM sys.dm_os_schedulers WHERE status = 'VISIBLE ONLINE') > 8
+      g.database_id = DB_ID()
+      AND
+      g.cpu_limit > 8
 UNION
 SELECT 1010 AS tip_id,
        CONCAT(
              @NbspCRLF,
-             'MAXDOP for primary: ', CAST(value AS varchar(2)), @CRLF,
-             'MAXDOP for secondary: ', ISNULL(CAST(value_for_secondary AS varchar(4)), 'NULL'), @CRLF
+             'MAXDOP for primary: ', CAST(c.value AS varchar(2)), @CRLF,
+             'MAXDOP for secondary: ', ISNULL(CAST(c.value_for_secondary AS varchar(4)), 'NULL'), @CRLF
              )
        AS details
-FROM sys.database_scoped_configurations
-WHERE name = N'MAXDOP'
+FROM sys.database_scoped_configurations AS c
+CROSS JOIN sys.dm_user_db_resource_governance AS g
+WHERE c.name = N'MAXDOP'
       AND
-      value NOT BETWEEN 1 AND 8
+      c.value NOT BETWEEN 1 AND 8
       AND
-      value_for_secondary BETWEEN 1 AND 8
+      c.value_for_secondary BETWEEN 1 AND 8
       AND
-      (SELECT COUNT(1) FROM sys.dm_os_schedulers WHERE status = 'VISIBLE ONLINE') > 8
+      g.database_id = DB_ID()
+      AND
+      g.cpu_limit > 8
 UNION
 SELECT 1020 AS tip_id,
        CONCAT(
              @NbspCRLF,
-             'MAXDOP for primary: ', CAST(value AS varchar(2)), @CRLF,
-             'MAXDOP for secondary: ', ISNULL(CAST(value_for_secondary AS varchar(4)), 'NULL'), @CRLF
+             'MAXDOP for primary: ', CAST(c.value AS varchar(2)), @CRLF,
+             'MAXDOP for secondary: ', ISNULL(CAST(c.value_for_secondary AS varchar(4)), 'NULL'), @CRLF
              )
        AS details
-FROM sys.database_scoped_configurations
+FROM sys.database_scoped_configurations AS c
+CROSS JOIN sys.dm_user_db_resource_governance AS g
 WHERE @EngineEdition = 5
       AND
-      name = N'MAXDOP'
+      c.name = N'MAXDOP'
       AND
-      value BETWEEN 1 AND 8
+      c.value BETWEEN 1 AND 8
       AND
-      value_for_secondary NOT BETWEEN 1 AND 8
+      c.value_for_secondary NOT BETWEEN 1 AND 8
       AND
-      (SELECT COUNT(1) FROM sys.dm_os_schedulers WHERE status = 'VISIBLE ONLINE') > 8
+      g.database_id = DB_ID()
+      AND
+      g.cpu_limit > 8
 ;
 
 -- Compatibility level
@@ -553,6 +575,770 @@ WHERE space_used_mb * 8 / 1024. > @UsedToAllocatedSpaceDbMinSizeMB -- not releva
       AND
       DATABASEPROPERTYEX(DB_NAME(), 'Edition') IN ('Premium','BusinessCritical') -- not relevant for remote storage SLOs
 ;
+
+-- High log rate
+WITH
+log_rate_snapshot AS
+(
+SELECT end_time,
+       avg_log_write_percent,
+       IIF(avg_log_write_percent > @HighLogRateThresholdPercent, 1, 0) AS high_log_rate_indicator
+FROM sys.dm_db_resource_stats
+WHERE @EngineEdition = 5
+      AND
+      DATABASEPROPERTYEX(DB_NAME(), 'Updateability') = 'READ_WRITE' -- only produce this on primary
+),
+pre_packed_log_rate_snapshot AS
+(
+SELECT end_time,
+       avg_log_write_percent,
+       high_log_rate_indicator,
+       ROW_NUMBER() OVER (ORDER BY end_time) -- row number across all readings, in increasing chronological order
+       -
+       SUM(high_log_rate_indicator) OVER (ORDER BY end_time ROWS UNBOUNDED PRECEDING) -- running count of all intervals where log rate exceeded the threshold
+       AS grouping_helper -- this difference remains constant while log rate is above the threshold, and can be used to collapse/pack an interval using aggregation
+FROM log_rate_snapshot
+),
+packed_log_rate_snapshot AS
+(
+SELECT MIN(end_time) AS min_end_time,
+       MAX(end_time) AS max_end_time,
+       MAX(avg_log_write_percent) AS max_log_write_percent
+FROM pre_packed_log_rate_snapshot
+WHERE high_log_rate_indicator = 1
+GROUP BY grouping_helper
+),
+log_rate_top_stat AS
+(
+SELECT MAX(DATEDIFF(second, min_end_time, max_end_time)) AS top_log_rate_duration_seconds,
+       MAX(max_log_write_percent) AS top_log_write_percent,
+       COUNT(1) AS count_high_log_write_intervals
+FROM packed_log_rate_snapshot 
+)
+INSERT INTO @DetectedTip (tip_id, details)
+SELECT 1190 AS tip_id,
+       CONCAT(
+             @NbspCRLF,
+             'In the last hour, there were ', count_high_log_write_intervals, 
+             ' interval(s) with transaction log IO staying above ', @HighLogRateThresholdPercent, 
+             '% of the service objective limit. The longest such interval lasted ', FORMAT(top_log_rate_duration_seconds, '#,0'),
+             ' seconds, and the maximum log IO was ', FORMAT(top_log_write_percent, '#,0.00'),
+             '%.',
+             @CRLF
+             ) AS details
+FROM log_rate_top_stat 
+WHERE count_high_log_write_intervals > 0
+;
+
+-- Plan cache bloat from single-use plans
+WITH plan_cache_db_summary AS
+(
+SELECT t.dbid AS database_id, -- In an elastic pool, return data for all databases
+       DB_NAME(t.dbid) AS database_name,
+       SUM(IIF(cp.usecounts = 1, cp.size_in_bytes / 1024. / 1024, 0)) AS single_use_db_plan_cache_size_mb,
+       SUM(cp.size_in_bytes / 1024. / 1024) AS total_db_plan_cache_size_mb
+FROM sys.dm_exec_cached_plans AS cp
+CROSS APPLY sys.dm_exec_sql_text(cp.plan_handle) AS t
+WHERE cp.objtype IN ('Adhoc','Prepared')
+      AND
+      cp.cacheobjtype = 'Compiled Plan'
+      AND
+      t.dbid BETWEEN 5 AND 32700 -- exclude system databases
+GROUP BY t.dbid
+)
+INSERT INTO @DetectedTip (tip_id, details)
+SELECT 1200 AS tip_id,
+       CONCAT(
+             @NbspCRLF,
+             STRING_AGG(
+                       CAST(CONCAT(
+                                  'database (id: ', database_id,
+                                  ', name: ' + QUOTENAME(database_name), -- database name is only available for current database, include for usability if available
+                                  '), single use plans take ', FORMAT(single_use_db_plan_cache_size_mb, 'N'),
+                                  ' MB, or ', FORMAT(single_use_db_plan_cache_size_mb / total_db_plan_cache_size_mb, 'P'),
+                                  ' of total cached plans for this database.'
+                                  ) AS nvarchar(max)), @CRLF
+                       )
+                       WITHIN GROUP (ORDER BY database_name DESC, database_id),
+             @CRLF
+             )
+       AS details
+FROM plan_cache_db_summary
+WHERE single_use_db_plan_cache_size_mb >= @SingleUsePlanSizeThresholdMB -- sufficiently large total size of single-use plans for a database
+      AND
+      single_use_db_plan_cache_size_mb * 1. / total_db_plan_cache_size_mb > @SingleUseTotalPlanSizeRatioThreshold -- single-use plans take more than n% of total plan cache size
+HAVING COUNT(1) > 0
+;
+
+-- Redo queue is large
+-- Applicable to Premium/Business Critical read scale-out replicas and all non-Hyperscale geo-replicas
+INSERT INTO @DetectedTip (tip_id, details)
+SELECT 1220 AS tip_id,
+       CONCAT(
+             @NbspCRLF,
+             'Current redo queue size: ',
+             FORMAT(redo_queue_size / 1024., 'N'),
+             ' MB. Most recent sampling of redo rate: ',
+             FORMAT(redo_rate / 1024., 'N'),
+             ' MB/s.',
+             @CRLF
+             )
+       AS details
+FROM sys.dm_database_replica_states
+WHERE is_primary_replica = 0 -- redo details only available on secondary
+      AND
+      is_local = 1
+      AND
+      redo_queue_size / 1024. > @RedoQueueSizeThresholdMB
+;
+
+-- Paused resumable index DDL
+WITH resumable_index_op AS
+(
+SELECT OBJECT_SCHEMA_NAME(iro.object_id) AS schema_name,
+       OBJECT_NAME(iro.object_id) AS object_name,
+       iro.name AS index_name,
+       i.type_desc AS index_type,
+       iro.percent_complete,
+       iro.start_time,
+       iro.last_pause_time,
+       iro.total_execution_time AS total_execution_time_minutes,
+       iro.page_count * 8 / 1024. AS index_operation_allocated_space_mb,
+       IIF(CAST(dsc.value AS int) = 0, NULL, DATEDIFF(minute, CURRENT_TIMESTAMP, DATEADD(minute, CAST(dsc.value AS int), iro.last_pause_time))) AS time_to_auto_abort_minutes,
+       iro.sql_text
+FROM sys.index_resumable_operations AS iro
+LEFT JOIN sys.indexes AS i -- new index being created will not be present, thus using outer join
+ON iro.object_id = i.object_id
+   AND
+   iro.index_id = i.index_id
+CROSS JOIN sys.database_scoped_configurations AS dsc
+WHERE iro.state_desc = 'PAUSED'
+      AND
+      dsc.name = 'PAUSED_RESUMABLE_INDEX_ABORT_DURATION_MINUTES'
+)
+INSERT INTO @DetectedTip (tip_id, details)
+SELECT 1280 AS tip_id,
+       CONCAT(
+             @NbspCRLF,
+             STRING_AGG(
+                       CAST(CONCAT(
+                                  'schema name: ', QUOTENAME(schema_name) COLLATE DATABASE_DEFAULT, @CRLF,
+                                  'object name: ', QUOTENAME(object_name) COLLATE DATABASE_DEFAULT, @CRLF,
+                                  'index name: ', QUOTENAME(index_name) COLLATE DATABASE_DEFAULT, @CRLF,
+                                  'index type: ' + index_type COLLATE DATABASE_DEFAULT + CHAR(13) + CHAR(10),
+                                  'percent complete: ', FORMAT(percent_complete, '#,0.00'), '%', @CRLF,
+                                  'start time: ', CONVERT(varchar(20), start_time, 120), @CRLF,
+                                  'last pause time: ', CONVERT(varchar(20), last_pause_time, 120), @CRLF,
+                                  'total execution time (minutes): ', FORMAT(total_execution_time_minutes, '#,0'), @CRLF,
+                                  'space allocated by resumable index operation (MB): ', FORMAT(index_operation_allocated_space_mb, '#,0.00'), @CRLF,
+                                  'time remaining to auto-abort (minutes): ' + FORMAT(time_to_auto_abort_minutes, '#,0') + CHAR(13) + CHAR(10),
+                                  'index operation SQL statement: ', sql_text COLLATE DATABASE_DEFAULT, @CRLF
+                                  ) AS nvarchar(max)), @CRLF
+                       )
+                       WITHIN GROUP (ORDER BY schema_name, object_name, index_name),
+             @CRLF
+             )
+FROM resumable_index_op 
+HAVING COUNT(1) > 0
+;
+
+-- Geo-replication health
+WITH 
+geo_replication_link_details AS
+(
+SELECT STRING_AGG(
+                 CAST(CONCAT(
+                            'link GUID: ', link_guid, ', ',
+                            'local server: ' + QUOTENAME(@@SERVERNAME) + ', ',
+                            'local database: ' + QUOTENAME(DB_NAME()) + ', ',
+                            'partner server: ' + QUOTENAME(partner_server) + ', ',
+                            'partner database: ' + QUOTENAME(partner_database) + ', ',
+                            'geo-replication role: ' + role_desc + ', ',
+                            'last replication time: ' + CAST(last_replication AS varchar(40)) + ', ',
+                            'geo-replication lag (seconds): ' + FORMAT(replication_lag_sec, '#,0') + ', ',
+                            'geo-replication state: ' + replication_state_desc
+                            ) AS nvarchar(max)), @CRLF
+                 )
+                 WITHIN GROUP (ORDER BY partner_server, partner_database)
+       AS details
+FROM sys.dm_geo_replication_link_status
+WHERE (replication_state_desc <> 'CATCH_UP' OR replication_state_desc IS NULL)
+      OR
+      -- high replication lag for recent transactions
+      (
+      replication_state_desc = 'CATCH_UP'
+      AND
+      replication_lag_sec > @HighGeoReplLagMinThresholdSeconds
+      AND
+      last_replication > DATEADD(second, -@RecentGeoReplTranTimeWindowLengthSeconds, SYSDATETIMEOFFSET())
+      )
+HAVING COUNT(1) > 0
+)
+INSERT INTO @DetectedTip (tip_id, details)
+SELECT 1300 AS tip_id,
+       CONCAT(
+             @NbspCRLF,
+             details,
+             @CRLF
+             )
+FROM geo_replication_link_details
+;
+
+-- Last partitions are not empty
+WITH 
+partition_stat AS
+(
+SELECT object_id,
+       partition_number,
+       reserved_page_count * 8 / 1024. AS size_mb,
+       row_count,
+       COUNT(1) OVER (PARTITION BY object_id) AS partition_count
+FROM sys.dm_db_partition_stats
+WHERE index_id IN (0,1)
+),
+object_last_partition AS
+(
+SELECT QUOTENAME(OBJECT_SCHEMA_NAME(ps.object_id)) COLLATE DATABASE_DEFAULT AS schema_name,
+       QUOTENAME(OBJECT_NAME(ps.object_id)) COLLATE DATABASE_DEFAULT AS object_name,
+       ps.partition_count,
+       ps.partition_number,
+       SUM(ps.row_count) AS partition_rows,
+       SUM(ps.size_mb) AS partition_size_mb
+FROM partition_stat AS ps
+INNER JOIN sys.objects AS o
+ON ps.object_id = o.object_id
+WHERE ps.partition_count > 1
+      AND
+      ps.partition_count - ps.partition_number < @MinEmptyPartitionCount -- Consider last n partitions
+      AND
+      o.is_ms_shipped = 0
+GROUP BY ps.object_id,
+         ps.partition_count,
+         ps.partition_number
+HAVING SUM(ps.row_count) > 0
+)
+INSERT INTO @DetectedTip (tip_id, details)
+SELECT 1310 AS tip_id,
+       CONCAT(
+             @NbspCRLF,
+             STRING_AGG(
+                       CAST(CONCAT(
+                                  'schema: ', schema_name, ', ',
+                                  'object: ', object_name, ', ',
+                                  'total partitions: ', FORMAT(partition_count, '#,0'), ', ',
+                                  'partition number: ', FORMAT(partition_number, '#,0'), ', ',
+                                  'partition rows: ', FORMAT(partition_rows, '#,0'), ', ',
+                                  'partition size (MB): ', FORMAT(partition_size_mb, '#,0.00'), ', '
+                                  ) AS nvarchar(max)), @CRLF
+                       )
+                       WITHIN GROUP (ORDER BY schema_name, object_name, partition_number),
+             @CRLF
+             )
+       AS details
+FROM object_last_partition
+HAVING COUNT(1) > 0
+;
+
+-- Top queries
+DROP TABLE IF EXISTS #query_wait_stats_summary;
+
+CREATE TABLE #query_wait_stats_summary
+(
+query_hash binary(8) PRIMARY KEY,
+ranked_wait_categories varchar(max) NOT NULL
+);
+
+-- query wait stats aggregated by query hash and wait category
+WITH
+query_wait_stats AS
+(
+SELECT q.query_hash,
+       ws.wait_category_desc,
+       SUM(ws.total_query_wait_time_ms) AS total_query_wait_time_ms
+FROM sys.query_store_query AS q
+INNER JOIN sys.query_store_plan AS p
+ON q.query_id = p.query_id
+INNER JOIN sys.query_store_wait_stats AS ws
+ON p.plan_id = ws.plan_id
+INNER JOIN sys.query_store_runtime_stats_interval AS rsi
+ON ws.runtime_stats_interval_id = rsi.runtime_stats_interval_id
+WHERE q.is_internal_query = 0
+      AND
+      q.is_clouddb_internal_query = 0
+      AND
+      rsi.start_time >= IIF(
+                           (@QueryStoreCustomTimeStart IS NULL OR @QueryStoreCustomTimeEnd IS NULL) AND @QueryStoreIntervalMinutes IS NOT NULL,
+                           DATEADD(minute, -@QueryStoreIntervalMinutes, SYSDATETIMEOFFSET()),
+                           @QueryStoreCustomTimeStart
+                           )
+      AND
+      rsi.start_time <= IIF(
+                           (@QueryStoreCustomTimeStart IS NULL OR @QueryStoreCustomTimeEnd IS NULL) AND @QueryStoreIntervalMinutes IS NOT NULL,
+                           SYSDATETIMEOFFSET(),
+                           @QueryStoreCustomTimeEnd
+                           )
+GROUP BY q.query_hash,
+         ws.wait_category_desc
+),
+query_wait_stats_ratio AS
+(
+SELECT query_hash,
+       total_query_wait_time_ms,
+       CONCAT(
+             wait_category_desc,
+             ' (', 
+             CAST(CAST(total_query_wait_time_ms * 1. / SUM(total_query_wait_time_ms) OVER (PARTITION BY query_hash) AS decimal(4,3)) AS varchar(5)),
+             ')'
+             ) AS wait_category_desc -- append relative wait weight to category name
+FROM query_wait_stats
+),
+-- query wait stats aggregated by query hash, with concatenated list of wait categories ranked with longest first
+query_wait_stats_summary AS
+(
+SELECT query_hash,
+       STRING_AGG(wait_category_desc, ' | ')
+       WITHIN GROUP (ORDER BY total_query_wait_time_ms DESC)
+       AS ranked_wait_categories
+FROM query_wait_stats_ratio
+GROUP BY query_hash
+)
+INSERT INTO #query_wait_stats_summary (query_hash, ranked_wait_categories) -- persist into a temp table for perf reasons
+SELECT query_hash, ranked_wait_categories
+FROM query_wait_stats_summary
+OPTION (RECOMPILE);
+
+UPDATE STATISTICS #query_wait_stats_summary;
+
+-- query runtime stats aggregated by query hash
+WITH
+query_runtime_stats AS
+(
+SELECT q.query_hash,
+       COUNT(DISTINCT(q.query_id)) AS count_queries,
+       MAX(q.query_id) AS query_id,
+       COUNT(DISTINCT(p.plan_id)) AS count_plans,
+       MAX(p.plan_id) AS plan_id,
+       SUM(IIF(rs.execution_type_desc = 'Regular', rs.count_executions, 0)) AS count_regular_executions,
+       SUM(IIF(rs.execution_type_desc = 'Aborted', rs.count_executions, 0)) AS count_aborted_executions,
+       SUM(IIF(rs.execution_type_desc = 'Exception', rs.count_executions, 0)) AS count_exception_executions,
+       SUM(rs.count_executions) AS count_executions,
+       SUM(rs.avg_cpu_time * rs.count_executions) AS total_cpu_time,
+       SUM(rs.avg_duration * rs.count_executions) AS total_duration,
+       SUM(rs.avg_logical_io_reads * rs.count_executions) AS total_logical_io_reads,
+       SUM(rs.avg_physical_io_reads * rs.count_executions) AS total_physical_io_reads,
+       SUM(rs.avg_query_max_used_memory * rs.count_executions) AS total_query_max_used_memory,
+       SUM(rs.avg_log_bytes_used * rs.count_executions) AS total_log_bytes_used,
+       SUM(rs.avg_tempdb_space_used * rs.count_executions) AS total_tempdb_space_used,
+       SUM(rs.avg_dop * rs.count_executions) AS total_dop
+FROM sys.query_store_query AS q
+INNER JOIN sys.query_store_plan AS p
+ON q.query_id = p.query_id
+INNER JOIN sys.query_store_runtime_stats AS rs
+ON p.plan_id = rs.plan_id
+INNER JOIN sys.query_store_runtime_stats_interval AS rsi
+ON rs.runtime_stats_interval_id = rsi.runtime_stats_interval_id
+WHERE q.is_internal_query = 0
+      AND
+      q.is_clouddb_internal_query = 0
+      AND
+      rsi.start_time >= IIF(
+                           (@QueryStoreCustomTimeStart IS NULL OR @QueryStoreCustomTimeEnd IS NULL) AND @QueryStoreIntervalMinutes IS NOT NULL,
+                           DATEADD(minute, -@QueryStoreIntervalMinutes, SYSDATETIMEOFFSET()),
+                           @QueryStoreCustomTimeStart
+                           )
+      AND
+      rsi.start_time <= IIF(
+                           (@QueryStoreCustomTimeStart IS NULL OR @QueryStoreCustomTimeEnd IS NULL) AND @QueryStoreIntervalMinutes IS NOT NULL,
+                           SYSDATETIMEOFFSET(),
+                           @QueryStoreCustomTimeEnd
+                           )
+GROUP BY q.query_hash
+),
+-- rank queries along multiple dimensions (cpu, duration, etc.), without ties
+query_rank AS
+(
+SELECT rs.query_hash,
+       rs.count_queries,
+       rs.query_id,
+       rs.count_plans,
+       rs.plan_id,
+       rs.count_regular_executions,
+       rs.count_aborted_executions,
+       rs.count_exception_executions,
+       ROW_NUMBER() OVER (ORDER BY rs.total_cpu_time DESC) AS cpu_time_rank,
+       ROW_NUMBER() OVER (ORDER BY rs.total_duration DESC) AS duration_rank,
+       ROW_NUMBER() OVER (ORDER BY rs.total_logical_io_reads DESC) AS logical_io_reads_rank,
+       ROW_NUMBER() OVER (ORDER BY rs.total_physical_io_reads DESC) AS physical_io_reads_rank,
+       ROW_NUMBER() OVER (ORDER BY rs.count_executions DESC) AS executions_rank,
+       ROW_NUMBER() OVER (ORDER BY rs.total_query_max_used_memory DESC) AS total_query_max_used_memory_rank,
+       ROW_NUMBER() OVER (ORDER BY rs.total_log_bytes_used DESC) AS total_log_bytes_used_rank,
+       ROW_NUMBER() OVER (ORDER BY rs.total_tempdb_space_used DESC) AS total_tempdb_space_used_rank,
+       ROW_NUMBER() OVER (ORDER BY rs.total_dop DESC) AS total_dop_rank,
+       -- if total_cpu_time for a query is 2 times less than for the immediately higher query in the rank order, do not consider it a top query
+       -- top_cpu_cutoff_indicator = 0 signifies a top query; the query where top_cpu_cutoff_indicator is 1 and any query with lower rank will be filtered out
+       IIF(rs.total_cpu_time * 1. / NULLIF(LEAD(rs.total_cpu_time) OVER (ORDER BY rs.total_cpu_time), 0) < 0.5, 1, 0) AS top_cpu_cutoff_indicator,
+       IIF(rs.total_duration * 1. / NULLIF(LEAD(rs.total_duration) OVER (ORDER BY rs.total_duration), 0) < 0.5, 1, 0) AS top_duration_cutoff_indicator,
+       IIF(rs.total_logical_io_reads * 1. / NULLIF(LEAD(rs.total_logical_io_reads) OVER (ORDER BY rs.total_logical_io_reads), 0) < 0.5, 1, 0) AS top_logical_io_reads_cutoff_indicator,
+       IIF(rs.total_physical_io_reads * 1. / NULLIF(LEAD(rs.total_physical_io_reads) OVER (ORDER BY rs.total_physical_io_reads), 0) < 0.5, 1, 0) AS top_physical_io_reads_cutoff_indicator,
+       IIF(rs.count_executions * 1. / NULLIF(LEAD(rs.count_executions) OVER (ORDER BY rs.count_executions), 0) < 0.5, 1, 0) AS top_executions_cutoff_indicator,
+       IIF(rs.total_query_max_used_memory * 1. / NULLIF(LEAD(rs.total_query_max_used_memory) OVER (ORDER BY rs.total_query_max_used_memory), 0) < 0.5, 1, 0) AS top_memory_cutoff_indicator,
+       IIF(rs.total_log_bytes_used * 1. / NULLIF(LEAD(rs.total_log_bytes_used) OVER (ORDER BY rs.total_log_bytes_used), 0) < 0.5, 1, 0) AS top_log_bytes_cutoff_indicator,
+       IIF(rs.total_tempdb_space_used * 1. / NULLIF(LEAD(rs.total_tempdb_space_used) OVER (ORDER BY rs.total_tempdb_space_used), 0) < 0.5, 1, 0) AS top_tempdb_cutoff_indicator,
+       IIF(rs.total_dop * 1. / NULLIF(LEAD(rs.total_dop) OVER (ORDER BY rs.total_dop), 0) < 0.5, 1, 0) AS top_dop_cutoff_indicator,
+       ws.ranked_wait_categories
+FROM query_runtime_stats AS rs
+LEFT JOIN #query_wait_stats_summary AS ws -- outer join in case wait stats collection is not enabled or waits are not available otherwise
+ON rs.query_hash = ws.query_hash
+),
+-- add running sums of cut off indicators along rank order; indicators will remain 0 for top queries, and >0 otherwise
+top_query_rank AS
+(
+SELECT *,
+       SUM(top_cpu_cutoff_indicator) OVER (ORDER BY cpu_time_rank ROWS UNBOUNDED PRECEDING) AS top_cpu_indicator,
+       SUM(top_duration_cutoff_indicator) OVER (ORDER BY duration_rank ROWS UNBOUNDED PRECEDING) AS top_duration_indicator,
+       SUM(top_logical_io_reads_cutoff_indicator) OVER (ORDER BY logical_io_reads_rank ROWS UNBOUNDED PRECEDING) AS top_logical_io_indicator,
+       SUM(top_physical_io_reads_cutoff_indicator) OVER (ORDER BY physical_io_reads_rank ROWS UNBOUNDED PRECEDING) AS top_physical_io_indicator,
+       SUM(top_executions_cutoff_indicator) OVER (ORDER BY executions_rank ROWS UNBOUNDED PRECEDING) AS top_executions_indicator,
+       SUM(top_memory_cutoff_indicator) OVER (ORDER BY total_query_max_used_memory_rank ROWS UNBOUNDED PRECEDING) AS top_memory_indicator,
+       SUM(top_log_bytes_cutoff_indicator) OVER (ORDER BY total_log_bytes_used_rank ROWS UNBOUNDED PRECEDING) AS top_log_bytes_indicator,
+       SUM(top_tempdb_cutoff_indicator) OVER (ORDER BY total_tempdb_space_used_rank ROWS UNBOUNDED PRECEDING) AS top_tempdb_indicator,
+       SUM(top_dop_cutoff_indicator) OVER (ORDER BY total_dop_rank ROWS UNBOUNDED PRECEDING) AS top_dop_indicator
+FROM query_rank
+),
+-- restrict to a union of queries that are top queries on some dimension; then, restrict further to top-within-top N queries along any dimension
+top_query AS
+(
+SELECT query_hash,
+       count_queries,
+       query_id,
+       count_plans,
+       plan_id,
+       count_regular_executions,
+       count_aborted_executions,
+       count_exception_executions,
+       cpu_time_rank,
+       duration_rank,
+       logical_io_reads_rank,
+       physical_io_reads_rank,
+       executions_rank,
+       total_query_max_used_memory_rank,
+       total_log_bytes_used_rank,
+       total_tempdb_space_used_rank,
+       total_dop_rank,
+       ranked_wait_categories
+FROM top_query_rank
+WHERE (
+      top_cpu_indicator = 0
+      OR
+      top_duration_indicator = 0
+      OR
+      top_executions_indicator = 0
+      OR
+      top_logical_io_indicator = 0
+      OR
+      top_physical_io_indicator = 0
+      OR
+      top_memory_indicator = 0
+      OR
+      top_log_bytes_indicator = 0
+      OR
+      top_tempdb_indicator = 0
+      OR
+      top_dop_indicator = 0
+      )
+      AND
+      (
+      cpu_time_rank <= @QueryStoreTopQueryCount
+      OR
+      duration_rank <= @QueryStoreTopQueryCount
+      OR
+      executions_rank <= @QueryStoreTopQueryCount
+      OR
+      logical_io_reads_rank <= @QueryStoreTopQueryCount
+      OR
+      physical_io_reads_rank <= @QueryStoreTopQueryCount
+      OR
+      total_query_max_used_memory_rank <= @QueryStoreTopQueryCount
+      OR
+      total_log_bytes_used_rank <= @QueryStoreTopQueryCount
+      OR
+      total_tempdb_space_used_rank <= @QueryStoreTopQueryCount
+      OR
+      total_dop_rank <= @QueryStoreTopQueryCount
+      )
+)
+INSERT INTO @DetectedTip (tip_id, details)
+SELECT 1320 AS tip_id,
+       CONCAT(
+             @NbspCRLF,
+             STRING_AGG(
+                       CAST(CONCAT(
+                                  'query hash: ', CONVERT(varchar(30), query_hash, 1),
+                                  ', query_id: ', CAST(query_id AS varchar(11)), IIF(count_queries > 1, CONCAT(' (+', CAST(count_queries - 1 AS varchar(11)), ')'), ''),
+                                  ', plan_id: ', CAST(plan_id AS varchar(11)), IIF(count_plans > 1, CONCAT(' (+', CAST(count_plans - 1 AS varchar(11)), ')'), ''),
+                                  ', executions: (regular: ', CAST(count_regular_executions AS varchar(11)), ', aborted: ', CAST(count_aborted_executions AS varchar(11)), ', exception: ', CAST(count_exception_executions AS varchar(11)), ')',
+                                  ', CPU time rank: ', CAST(cpu_time_rank AS varchar(11)),
+                                  ', duration rank: ', CAST(duration_rank AS varchar(11)),
+                                  ', executions rank: ', CAST(executions_rank AS varchar(11)),
+                                  ', logical IO reads rank: ', CAST(logical_io_reads_rank AS varchar(11)),
+                                  ', physical IO reads rank: ', CAST(physical_io_reads_rank AS varchar(11)),
+                                  ', max used memory rank: ', CAST(total_query_max_used_memory_rank AS varchar(11)),
+                                  ', log bytes used rank: ', CAST(total_log_bytes_used_rank AS varchar(11)),
+                                  ', tempdb used rank: ', CAST(total_tempdb_space_used_rank AS varchar(11)),
+                                  ', parallelism rank: ', CAST(total_dop_rank AS varchar(11)),
+                                  ', weighted wait categories: ', ISNULL(ranked_wait_categories, '-')
+                                  ) AS nvarchar(max)), @CRLF
+                       )
+                       WITHIN GROUP (ORDER BY duration_rank),
+             @CRLF
+             )
+       AS details
+FROM top_query
+HAVING COUNT(1) > 0
+OPTION (RECOMPILE)
+;
+
+-- tempdb data and log size close to maxsize
+
+-- get tempdb used (aka reserved) size
+DROP TABLE IF EXISTS #tempdb_space_used;
+
+CREATE TABLE #tempdb_space_used
+(
+database_name sysname NULL,
+database_size varchar(18) NULL,
+unallocated_space varchar(18) NULL,
+reserved varchar(18) NULL,
+data varchar(18) NULL,
+index_size varchar(18) NULL,
+unused varchar(18) NULL
+);
+
+-- When not running as server admin and without membership in ##MS_ServerStateReader## we do not have
+-- VIEW DATABASE STATE on tempdb, which is required to execute tempdb.sys.sp_spaceused to determine tempdb used space.
+-- Skipping tip 1340 (tempdb used space) in that case.
+IF EXISTS (
+          SELECT 1
+          FROM tempdb.sys.fn_my_permissions(default, 'DATABASE')
+          WHERE entity_name = 'database'
+                AND
+                permission_name = 'VIEW DATABASE STATE'
+          )
+BEGIN
+    INSERT INTO #tempdb_space_used
+    EXEC tempdb.sys.sp_spaceused @oneresultset = 1;
+
+    IF @@ROWCOUNT <> 1
+        THROW 50020, 'tempdb.sys.sp_spaceused returned the number of rows other than 1.', 1;
+END;
+
+WITH tempdb_file_size AS
+(
+SELECT type_desc AS file_type,
+       SUM(size * 8 / 1024.) AS allocated_size_mb,
+       SUM(max_size * 8 / 1024.) AS max_size_mb,
+       SUM(IIF(type_desc = 'ROWS', 1, NULL)) AS count_files
+FROM tempdb.sys.database_files
+WHERE type_desc IN ('ROWS','LOG')
+GROUP BY type_desc
+),
+tempdb_tip AS
+(
+SELECT tfs.file_type,
+       tt.space_type,
+       tfs.allocated_size_mb,
+       TRY_CAST(LEFT(tsu.reserved, LEN(tsu.reserved) - 3) AS decimal) / 1024. AS used_size_mb,
+       tfs.max_size_mb,
+       tfs.count_files
+FROM tempdb_file_size AS tfs
+INNER JOIN (
+           VALUES ('ROWS', 'allocated'),
+                  ('ROWS', 'used'),
+                  ('LOG', 'allocated')
+           ) AS tt (file_type, space_type)
+ON tfs.file_type = tt.file_type
+LEFT JOIN #tempdb_space_used AS tsu
+ON tfs.file_type = 'ROWS'
+)
+INSERT INTO @DetectedTip (tip_id, details)
+SELECT CASE WHEN file_type = 'ROWS' AND space_type = 'allocated' THEN 1330
+            WHEN file_type = 'ROWS' AND space_type = 'used' THEN 1340
+            WHEN file_type = 'LOG' THEN 1350 
+       END 
+       AS tip_id,
+       CONCAT(
+             @NbspCRLF,
+             'tempdb ', CASE file_type WHEN 'ROWS' THEN 'data' WHEN 'LOG' THEN 'log' END , ' allocated size (MB): ', FORMAT(allocated_size_mb, '#,0.00'),
+             ', tempdb data used size (MB): ' + FORMAT(used_size_mb, '#,0.00'),
+             ', tempdb ', CASE file_type WHEN 'ROWS' THEN 'data' WHEN 'LOG' THEN 'log' END, ' MAXSIZE (MB): ', FORMAT(max_size_mb, '#,0.00'),
+             ', tempdb data files: ' + CAST(count_files AS varchar(11)),
+             @CRLF
+             )
+       AS details
+FROM tempdb_tip
+WHERE (file_type = 'ROWS' AND space_type = 'allocated' AND allocated_size_mb / NULLIF(max_size_mb, 0) > @TempdbDataAllocatedToMaxsizeThresholdRatio)
+      OR
+      (file_type = 'ROWS' AND space_type = 'used' AND used_size_mb / NULLIF(max_size_mb, 0) > @TempdbDataUsedToMaxsizeThresholdRatio)
+      OR
+      (file_type = 'LOG'  AND space_type = 'allocated' AND allocated_size_mb / NULLIF(max_size_mb, 0) > @TempdbLogAllocatedToMaxsizeThresholdRatio)
+;
+
+-- High instance CPU
+WITH
+instance_cpu_snapshot AS
+(
+SELECT end_time,
+       avg_instance_cpu_percent,
+       IIF(avg_instance_cpu_percent > @HighInstanceCPUThresholdPercent, 1, 0) AS high_instance_cpu_indicator
+FROM sys.dm_db_resource_stats
+WHERE @EngineEdition = 5
+),
+pre_packed_instance_cpu_snapshot AS
+(
+SELECT end_time,
+       avg_instance_cpu_percent,
+       high_instance_cpu_indicator,
+       ROW_NUMBER() OVER (ORDER BY end_time) -- row number across all readings, in increasing chronological order
+       -
+       SUM(high_instance_cpu_indicator) OVER (ORDER BY end_time ROWS UNBOUNDED PRECEDING) -- running count of all intervals where log rate exceeded the threshold
+       AS grouping_helper -- this difference remains constant while log rate is above the threshold, and can be used to collapse/pack an interval using aggregation
+FROM instance_cpu_snapshot
+),
+packed_instance_cpu_snapshot AS
+(
+SELECT MIN(end_time) AS min_end_time,
+       MAX(end_time) AS max_end_time,
+       MAX(avg_instance_cpu_percent) AS max_instance_cpu_percent
+FROM pre_packed_instance_cpu_snapshot
+WHERE high_instance_cpu_indicator = 1
+GROUP BY grouping_helper
+HAVING DATEDIFF(second, MIN(end_time), MAX(end_time)) > @HighInstanceCPUMinThresholdSeconds
+),
+instance_cpu_top_stat AS
+(
+SELECT MAX(DATEDIFF(second, min_end_time, max_end_time)) AS top_instance_cpu_duration_seconds,
+       MAX(max_instance_cpu_percent) AS top_instance_cpu_percent,
+       COUNT(1) AS count_high_instance_cpu_intervals
+FROM packed_instance_cpu_snapshot 
+)
+INSERT INTO @DetectedTip (tip_id, details)
+SELECT 1390 AS tip_id,
+       CONCAT(
+             @NbspCRLF,
+             'In the last hour, there were ', count_high_instance_cpu_intervals, 
+             ' interval(s) with instance CPU utilization staying above ', @HighInstanceCPUThresholdPercent, 
+             '% for at least ' , FORMAT(@HighInstanceCPUMinThresholdSeconds, '#,0'),
+             ' seconds. The longest such interval lasted ', FORMAT(top_instance_cpu_duration_seconds, '#,0'),
+             ' seconds, and the maximum instance CPU utilization was ', FORMAT(top_instance_cpu_percent, '#,0.00'),
+             '%.',
+             @CRLF
+             ) AS details
+FROM instance_cpu_top_stat 
+WHERE count_high_instance_cpu_intervals > 0
+;
+
+-- Stale stats
+WITH
+object_size AS
+(
+SELECT object_id,
+       SUM(row_count) AS object_row_count
+FROM sys.dm_db_partition_stats
+WHERE index_id IN (0,1) -- clustered index or heap
+GROUP BY object_id
+),
+stale_stats AS
+(
+SELECT OBJECT_SCHEMA_NAME(s.object_id) COLLATE DATABASE_DEFAULT AS schema_name,
+       OBJECT_NAME(s.object_id) COLLATE DATABASE_DEFAULT AS object_name,
+       s.name COLLATE DATABASE_DEFAULT AS statistics_name,
+       s.auto_created,
+       s.user_created,
+       s.no_recompute,
+       s.is_temporary,
+       s.is_incremental,
+       s.has_persisted_sample,
+       s.has_filter,
+       sp.last_updated,
+       sp.unfiltered_rows,
+       sp.rows_sampled,
+       os.object_row_count,
+       sp.modification_counter
+FROM sys.stats AS s
+INNER JOIN sys.objects AS o
+ON s.object_id = o.object_id
+INNER JOIN object_size AS os
+ON o.object_id = os.object_id
+CROSS APPLY sys.dm_db_stats_properties(s.object_id, s.stats_id) AS sp
+WHERE (
+      o.is_ms_shipped = 0
+      OR
+      (OBJECT_SCHEMA_NAME(s.object_id) = 'sys' AND o.name LIKE 'plan[_]persist[_]%') -- include Query Store system tables
+      )
+      AND
+      (
+      -- object cardinality has changed substantially since last stats update
+      ABS(ISNULL(sp.unfiltered_rows, 0) - os.object_row_count) / NULLIF(((ISNULL(sp.unfiltered_rows, 0) + os.object_row_count) / 2), 0) > @StaleStatsCardinalityChangeMinDifference
+      OR
+      -- no stats blob created
+      (sp.last_updated IS NULL AND os.object_row_count > 0)
+      OR
+      -- naive: stats for an object with many modifications not updated for a substantial time interval
+      (sp.modification_counter > @StaleStatsMinModificationCountRatio * os.object_row_count AND DATEDIFF(day, sp.last_updated, SYSDATETIME()) > @StaleStatsMinAgeThresholdDays)
+      )
+)
+INSERT INTO @DetectedTip (tip_id, details)
+SELECT 1400 AS tip_id,
+       CONCAT(
+             @NbspCRLF,
+             'Total potentially out of date statistics: ', COUNT(1),
+             REPLICATE(@CRLF, 2),
+             STRING_AGG(
+                       CAST(CONCAT(
+                                  schema_name, '.', 
+                                  object_name, '.', 
+                                  statistics_name, 
+                                  ', last updated: ', ISNULL(FORMAT(last_updated, 's'), '-'), 
+                                  ', last update rows: ', ISNULL(FORMAT(unfiltered_rows, '#,0'), '-'), 
+                                  ', last update sampled rows: ', ISNULL(FORMAT(rows_sampled, '#,0'), '-'), 
+                                  ', current rows: ', FORMAT(object_row_count, '#,0'),
+                                  ', modifications: ', ISNULL(FORMAT(modification_counter, '#,0'), '-'),
+                                  ', attributes: '
+                                  + 
+                                  NULLIF(
+                                        CONCAT_WS(
+                                                 ',',
+                                                 IIF(auto_created = 1, 'auto-created', NULL),
+                                                 IIF(user_created = 1, 'user-created', NULL),
+                                                 IIF(no_recompute = 1, 'no_recompute', NULL),
+                                                 IIF(is_temporary = 1, 'temporary', NULL),
+                                                 IIF(is_incremental = 1, 'incremental', NULL),
+                                                 IIF(has_filter = 1, 'filtered', NULL),
+                                                 IIF(has_persisted_sample = 1, 'persisted sample', NULL)
+                                                 )
+                                        , '')
+                                  ) AS nvarchar(max)), @CRLF
+                       ) WITHIN GROUP (ORDER BY schema_name, object_name, statistics_name),
+             @CRLF
+             )
+       AS details
+FROM stale_stats
+HAVING COUNT(1) > 0
+
+-- For tips that follow, VIEW DATABASE STATE is insufficient.
+-- Determine if we have VIEW SERVER STATE empirically, given the absense of metadata to determine that otherwise.
+BEGIN TRY
+    DECLARE @a int = (SELECT 1 FROM sys.dm_os_sys_info);
+END TRY
+BEGIN CATCH
+    IF ERROR_NUMBER() <> 0
+        SELECT @ViewServerStateIndicator = 0;
+END CATCH;
+
+-- Proceed with the rest of the tips only if required permission is held
+
+IF @ViewServerStateIndicator = 1
+BEGIN -- begin tips requiring VIEW SERVER STATE
 
 -- Recent CPU throttling
 WITH cpu_throttling AS
@@ -879,100 +1665,6 @@ CROSS JOIN sys.dm_os_sys_info AS si
 WHERE ppga.details IS NOT NULL
 ;
 
--- High log rate
-WITH
-log_rate_snapshot AS
-(
-SELECT end_time,
-       avg_log_write_percent,
-       IIF(avg_log_write_percent > @HighLogRateThresholdPercent, 1, 0) AS high_log_rate_indicator
-FROM sys.dm_db_resource_stats
-WHERE @EngineEdition = 5
-      AND
-      DATABASEPROPERTYEX(DB_NAME(), 'Updateability') = 'READ_WRITE' -- only produce this on primary
-),
-pre_packed_log_rate_snapshot AS
-(
-SELECT end_time,
-       avg_log_write_percent,
-       high_log_rate_indicator,
-       ROW_NUMBER() OVER (ORDER BY end_time) -- row number across all readings, in increasing chronological order
-       -
-       SUM(high_log_rate_indicator) OVER (ORDER BY end_time ROWS UNBOUNDED PRECEDING) -- running count of all intervals where log rate exceeded the threshold
-       AS grouping_helper -- this difference remains constant while log rate is above the threshold, and can be used to collapse/pack an interval using aggregation
-FROM log_rate_snapshot
-),
-packed_log_rate_snapshot AS
-(
-SELECT MIN(end_time) AS min_end_time,
-       MAX(end_time) AS max_end_time,
-       MAX(avg_log_write_percent) AS max_log_write_percent
-FROM pre_packed_log_rate_snapshot
-WHERE high_log_rate_indicator = 1
-GROUP BY grouping_helper
-),
-log_rate_top_stat AS
-(
-SELECT MAX(DATEDIFF(second, min_end_time, max_end_time)) AS top_log_rate_duration_seconds,
-       MAX(max_log_write_percent) AS top_log_write_percent,
-       COUNT(1) AS count_high_log_write_intervals
-FROM packed_log_rate_snapshot 
-)
-INSERT INTO @DetectedTip (tip_id, details)
-SELECT 1190 AS tip_id,
-       CONCAT(
-             @NbspCRLF,
-             'In the last hour, there were ', count_high_log_write_intervals, 
-             ' interval(s) with transaction log IO staying above ', @HighLogRateThresholdPercent, 
-             '% of the service objective limit. The longest such interval lasted ', FORMAT(top_log_rate_duration_seconds, '#,0'),
-             ' seconds, and the maximum log IO was ', FORMAT(top_log_write_percent, '#,0.00'),
-             '%.',
-             @CRLF
-             ) AS details
-FROM log_rate_top_stat 
-WHERE count_high_log_write_intervals > 0
-;
-
--- Plan cache bloat from single-use plans
-WITH plan_cache_db_summary AS
-(
-SELECT t.dbid AS database_id, -- In an elastic pool, return data for all databases
-       DB_NAME(t.dbid) AS database_name,
-       SUM(IIF(cp.usecounts = 1, cp.size_in_bytes / 1024. / 1024, 0)) AS single_use_db_plan_cache_size_mb,
-       SUM(cp.size_in_bytes / 1024. / 1024) AS total_db_plan_cache_size_mb
-FROM sys.dm_exec_cached_plans AS cp
-CROSS APPLY sys.dm_exec_sql_text(cp.plan_handle) AS t
-WHERE cp.objtype IN ('Adhoc','Prepared')
-      AND
-      cp.cacheobjtype = 'Compiled Plan'
-      AND
-      t.dbid BETWEEN 5 AND 32700 -- exclude system databases
-GROUP BY t.dbid
-)
-INSERT INTO @DetectedTip (tip_id, details)
-SELECT 1200 AS tip_id,
-       CONCAT(
-             @NbspCRLF,
-             STRING_AGG(
-                       CAST(CONCAT(
-                                  'database (id: ', database_id,
-                                  ', name: ' + QUOTENAME(database_name), -- database name is only available for current database, include for usability if available
-                                  '), single use plans take ', FORMAT(single_use_db_plan_cache_size_mb, 'N'),
-                                  ' MB, or ', FORMAT(single_use_db_plan_cache_size_mb / total_db_plan_cache_size_mb, 'P'),
-                                  ' of total cached plans for this database.'
-                                  ) AS nvarchar(max)), @CRLF
-                       )
-                       WITHIN GROUP (ORDER BY database_name DESC, database_id),
-             @CRLF
-             )
-       AS details
-FROM plan_cache_db_summary
-WHERE single_use_db_plan_cache_size_mb >= @SingleUsePlanSizeThresholdMB -- sufficiently large total size of single-use plans for a database
-      AND
-      single_use_db_plan_cache_size_mb * 1. / total_db_plan_cache_size_mb > @SingleUseTotalPlanSizeRatioThreshold -- single-use plans take more than n% of total plan cache size
-HAVING COUNT(1) > 0
-;
-
 -- Missing indexes
 WITH missing_index_agg AS
 (
@@ -1012,28 +1704,6 @@ SELECT 1210 AS tip_id,
 FROM missing_index_agg AS mia
 CROSS JOIN sys.dm_os_sys_info AS si
 WHERE mia.details IS NOT NULL
-;
-
--- Redo queue is large
--- Applicable to Premium/Business Critical read scale-out replicas and all non-Hyperscale geo-replicas
-INSERT INTO @DetectedTip (tip_id, details)
-SELECT 1220 AS tip_id,
-       CONCAT(
-             @NbspCRLF,
-             'Current redo queue size: ',
-             FORMAT(redo_queue_size / 1024., 'N'),
-             ' MB. Most recent sampling of redo rate: ',
-             FORMAT(redo_rate / 1024., 'N'),
-             ' MB/s.',
-             @CRLF
-             )
-       AS details
-FROM sys.dm_database_replica_states
-WHERE is_primary_replica = 0 -- redo details only available on secondary
-      AND
-      is_local = 1
-      AND
-      redo_queue_size / 1024. > @RedoQueueSizeThresholdMB
 ;
 
 -- Data IO reaching user workload group SLO limit, or significant IO RG impact at user workload group level
@@ -1504,56 +2174,6 @@ SELECT 1270 AS tip_id,
 FROM pvs_db_stats
 ;
 
--- Paused resumable index DDL
-WITH resumable_index_op AS
-(
-SELECT OBJECT_SCHEMA_NAME(iro.object_id) AS schema_name,
-       OBJECT_NAME(iro.object_id) AS object_name,
-       iro.name AS index_name,
-       i.type_desc AS index_type,
-       iro.percent_complete,
-       iro.start_time,
-       iro.last_pause_time,
-       iro.total_execution_time AS total_execution_time_minutes,
-       iro.page_count * 8 / 1024. AS index_operation_allocated_space_mb,
-       IIF(CAST(dsc.value AS int) = 0, NULL, DATEDIFF(minute, CURRENT_TIMESTAMP, DATEADD(minute, CAST(dsc.value AS int), iro.last_pause_time))) AS time_to_auto_abort_minutes,
-       iro.sql_text
-FROM sys.index_resumable_operations AS iro
-LEFT JOIN sys.indexes AS i -- new index being created will not be present, thus using outer join
-ON iro.object_id = i.object_id
-   AND
-   iro.index_id = i.index_id
-CROSS JOIN sys.database_scoped_configurations AS dsc
-WHERE iro.state_desc = 'PAUSED'
-      AND
-      dsc.name = 'PAUSED_RESUMABLE_INDEX_ABORT_DURATION_MINUTES'
-)
-INSERT INTO @DetectedTip (tip_id, details)
-SELECT 1280 AS tip_id,
-       CONCAT(
-             @NbspCRLF,
-             STRING_AGG(
-                       CAST(CONCAT(
-                                  'schema name: ', QUOTENAME(schema_name) COLLATE DATABASE_DEFAULT, @CRLF,
-                                  'object name: ', QUOTENAME(object_name) COLLATE DATABASE_DEFAULT, @CRLF,
-                                  'index name: ', QUOTENAME(index_name) COLLATE DATABASE_DEFAULT, @CRLF,
-                                  'index type: ' + index_type COLLATE DATABASE_DEFAULT + CHAR(13) + CHAR(10),
-                                  'percent complete: ', FORMAT(percent_complete, '#,0.00'), '%', @CRLF,
-                                  'start time: ', CONVERT(varchar(20), start_time, 120), @CRLF,
-                                  'last pause time: ', CONVERT(varchar(20), last_pause_time, 120), @CRLF,
-                                  'total execution time (minutes): ', FORMAT(total_execution_time_minutes, '#,0'), @CRLF,
-                                  'space allocated by resumable index operation (MB): ', FORMAT(index_operation_allocated_space_mb, '#,0.00'), @CRLF,
-                                  'time remaining to auto-abort (minutes): ' + FORMAT(time_to_auto_abort_minutes, '#,0') + CHAR(13) + CHAR(10),
-                                  'index operation SQL statement: ', sql_text COLLATE DATABASE_DEFAULT, @CRLF
-                                  ) AS nvarchar(max)), @CRLF
-                       )
-                       WITHIN GROUP (ORDER BY schema_name, object_name, index_name),
-             @CRLF
-             )
-FROM resumable_index_op 
-HAVING COUNT(1) > 0
-;
-
 -- CCI candidates
 WITH
 candidate_partition AS
@@ -1693,447 +2313,6 @@ SELECT 1290 AS tip_id,
 FROM cci_candidate_details AS ccd
 CROSS JOIN sys.dm_os_sys_info AS si
 WHERE ccd.details IS NOT NULL
-;
-
--- Geo-replication health
-WITH 
-geo_replication_link_details AS
-(
-SELECT STRING_AGG(
-                 CAST(CONCAT(
-                            'link GUID: ', link_guid, ', ',
-                            'local server: ' + QUOTENAME(@@SERVERNAME) + ', ',
-                            'local database: ' + QUOTENAME(DB_NAME()) + ', ',
-                            'partner server: ' + QUOTENAME(partner_server) + ', ',
-                            'partner database: ' + QUOTENAME(partner_database) + ', ',
-                            'geo-replication role: ' + role_desc + ', ',
-                            'last replication time: ' + CAST(last_replication AS varchar(40)) + ', ',
-                            'geo-replication lag (seconds): ' + FORMAT(replication_lag_sec, '#,0') + ', ',
-                            'geo-replication state: ' + replication_state_desc
-                            ) AS nvarchar(max)), @CRLF
-                 )
-                 WITHIN GROUP (ORDER BY partner_server, partner_database)
-       AS details
-FROM sys.dm_geo_replication_link_status
-WHERE (replication_state_desc <> 'CATCH_UP' OR replication_state_desc IS NULL)
-      OR
-      -- high replication lag for recent transactions
-      (
-      replication_state_desc = 'CATCH_UP'
-      AND
-      replication_lag_sec > @HighGeoReplLagMinThresholdSeconds
-      AND
-      last_replication > DATEADD(second, -@RecentGeoReplTranTimeWindowLengthSeconds, SYSDATETIMEOFFSET())
-      )
-HAVING COUNT(1) > 0
-)
-INSERT INTO @DetectedTip (tip_id, details)
-SELECT 1300 AS tip_id,
-       CONCAT(
-             @NbspCRLF,
-             details,
-             @CRLF
-             )
-FROM geo_replication_link_details
-;
-
--- Last partitions are not empty
-WITH 
-partition_stat AS
-(
-SELECT object_id,
-       partition_number,
-       reserved_page_count * 8 / 1024. AS size_mb,
-       row_count,
-       COUNT(1) OVER (PARTITION BY object_id) AS partition_count
-FROM sys.dm_db_partition_stats
-WHERE index_id IN (0,1)
-),
-object_last_partition AS
-(
-SELECT QUOTENAME(OBJECT_SCHEMA_NAME(ps.object_id)) COLLATE DATABASE_DEFAULT AS schema_name,
-       QUOTENAME(OBJECT_NAME(ps.object_id)) COLLATE DATABASE_DEFAULT AS object_name,
-       ps.partition_count,
-       ps.partition_number,
-       SUM(ps.row_count) AS partition_rows,
-       SUM(ps.size_mb) AS partition_size_mb
-FROM partition_stat AS ps
-INNER JOIN sys.objects AS o
-ON ps.object_id = o.object_id
-WHERE ps.partition_count > 1
-      AND
-      ps.partition_count - ps.partition_number < @MinEmptyPartitionCount -- Consider last n partitions
-      AND
-      o.is_ms_shipped = 0
-GROUP BY ps.object_id,
-         ps.partition_count,
-         ps.partition_number
-HAVING SUM(ps.row_count) > 0
-)
-INSERT INTO @DetectedTip (tip_id, details)
-SELECT 1310 AS tip_id,
-       CONCAT(
-             @NbspCRLF,
-             STRING_AGG(
-                       CAST(CONCAT(
-                                  'schema: ', schema_name, ', ',
-                                  'object: ', object_name, ', ',
-                                  'total partitions: ', FORMAT(partition_count, '#,0'), ', ',
-                                  'partition number: ', FORMAT(partition_number, '#,0'), ', ',
-                                  'partition rows: ', FORMAT(partition_rows, '#,0'), ', ',
-                                  'partition size (MB): ', FORMAT(partition_size_mb, '#,0.00'), ', '
-                                  ) AS nvarchar(max)), @CRLF
-                       )
-                       WITHIN GROUP (ORDER BY schema_name, object_name, partition_number),
-             @CRLF
-             )
-       AS details
-FROM object_last_partition
-HAVING COUNT(1) > 0
-;
-
--- Top queries
-DROP TABLE IF EXISTS #query_wait_stats_summary;
-
-CREATE TABLE #query_wait_stats_summary
-(
-query_hash binary(8) PRIMARY KEY,
-ranked_wait_categories varchar(max) NOT NULL
-);
-
--- query wait stats aggregated by query hash and wait category
-WITH
-query_wait_stats AS
-(
-SELECT q.query_hash,
-       ws.wait_category_desc,
-       SUM(ws.total_query_wait_time_ms) AS total_query_wait_time_ms
-FROM sys.query_store_query AS q
-INNER JOIN sys.query_store_plan AS p
-ON q.query_id = p.query_id
-INNER JOIN sys.query_store_wait_stats AS ws
-ON p.plan_id = ws.plan_id
-INNER JOIN sys.query_store_runtime_stats_interval AS rsi
-ON ws.runtime_stats_interval_id = rsi.runtime_stats_interval_id
-WHERE q.is_internal_query = 0
-      AND
-      q.is_clouddb_internal_query = 0
-      AND
-      rsi.start_time >= IIF(
-                           (@QueryStoreCustomTimeStart IS NULL OR @QueryStoreCustomTimeEnd IS NULL) AND @QueryStoreIntervalMinutes IS NOT NULL,
-                           DATEADD(minute, -@QueryStoreIntervalMinutes, SYSDATETIMEOFFSET()),
-                           @QueryStoreCustomTimeStart
-                           )
-      AND
-      rsi.start_time <= IIF(
-                           (@QueryStoreCustomTimeStart IS NULL OR @QueryStoreCustomTimeEnd IS NULL) AND @QueryStoreIntervalMinutes IS NOT NULL,
-                           SYSDATETIMEOFFSET(),
-                           @QueryStoreCustomTimeEnd
-                           )
-GROUP BY q.query_hash,
-         ws.wait_category_desc
-),
-query_wait_stats_ratio AS
-(
-SELECT query_hash,
-       total_query_wait_time_ms,
-       CONCAT(
-             wait_category_desc,
-             ' (', 
-             CAST(CAST(total_query_wait_time_ms * 1. / SUM(total_query_wait_time_ms) OVER (PARTITION BY query_hash) AS decimal(4,3)) AS varchar(5)),
-             ')'
-             ) AS wait_category_desc -- append relative wait weight to category name
-FROM query_wait_stats
-),
--- query wait stats aggregated by query hash, with concatenated list of wait categories ranked with longest first
-query_wait_stats_summary AS
-(
-SELECT query_hash,
-       STRING_AGG(wait_category_desc, ' | ')
-       WITHIN GROUP (ORDER BY total_query_wait_time_ms DESC)
-       AS ranked_wait_categories
-FROM query_wait_stats_ratio
-GROUP BY query_hash
-)
-INSERT INTO #query_wait_stats_summary (query_hash, ranked_wait_categories) -- persist into a temp table for perf reasons
-SELECT query_hash, ranked_wait_categories
-FROM query_wait_stats_summary
-OPTION (RECOMPILE);
-
-UPDATE STATISTICS #query_wait_stats_summary;
-
--- query runtime stats aggregated by query hash
-WITH
-query_runtime_stats AS
-(
-SELECT q.query_hash,
-       COUNT(DISTINCT(q.query_id)) AS count_queries,
-       MAX(q.query_id) AS query_id,
-       COUNT(DISTINCT(p.plan_id)) AS count_plans,
-       MAX(p.plan_id) AS plan_id,
-       SUM(IIF(rs.execution_type_desc = 'Regular', rs.count_executions, 0)) AS count_regular_executions,
-       SUM(IIF(rs.execution_type_desc = 'Aborted', rs.count_executions, 0)) AS count_aborted_executions,
-       SUM(IIF(rs.execution_type_desc = 'Exception', rs.count_executions, 0)) AS count_exception_executions,
-       SUM(rs.count_executions) AS count_executions,
-       SUM(rs.avg_cpu_time * rs.count_executions) AS total_cpu_time,
-       SUM(rs.avg_duration * rs.count_executions) AS total_duration,
-       SUM(rs.avg_logical_io_reads * rs.count_executions) AS total_logical_io_reads,
-       SUM(rs.avg_physical_io_reads * rs.count_executions) AS total_physical_io_reads,
-       SUM(rs.avg_query_max_used_memory * rs.count_executions) AS total_query_max_used_memory,
-       SUM(rs.avg_log_bytes_used * rs.count_executions) AS total_log_bytes_used,
-       SUM(rs.avg_tempdb_space_used * rs.count_executions) AS total_tempdb_space_used,
-       SUM(rs.avg_dop * rs.count_executions) AS total_dop
-FROM sys.query_store_query AS q
-INNER JOIN sys.query_store_plan AS p
-ON q.query_id = p.query_id
-INNER JOIN sys.query_store_runtime_stats AS rs
-ON p.plan_id = rs.plan_id
-INNER JOIN sys.query_store_runtime_stats_interval AS rsi
-ON rs.runtime_stats_interval_id = rsi.runtime_stats_interval_id
-WHERE q.is_internal_query = 0
-      AND
-      q.is_clouddb_internal_query = 0
-      AND
-      rsi.start_time >= IIF(
-                           (@QueryStoreCustomTimeStart IS NULL OR @QueryStoreCustomTimeEnd IS NULL) AND @QueryStoreIntervalMinutes IS NOT NULL,
-                           DATEADD(minute, -@QueryStoreIntervalMinutes, SYSDATETIMEOFFSET()),
-                           @QueryStoreCustomTimeStart
-                           )
-      AND
-      rsi.start_time <= IIF(
-                           (@QueryStoreCustomTimeStart IS NULL OR @QueryStoreCustomTimeEnd IS NULL) AND @QueryStoreIntervalMinutes IS NOT NULL,
-                           SYSDATETIMEOFFSET(),
-                           @QueryStoreCustomTimeEnd
-                           )
-GROUP BY q.query_hash
-),
--- rank queries along multiple dimensions (cpu, duration, etc.), without ties
-query_rank AS
-(
-SELECT rs.query_hash,
-       rs.count_queries,
-       rs.query_id,
-       rs.count_plans,
-       rs.plan_id,
-       rs.count_regular_executions,
-       rs.count_aborted_executions,
-       rs.count_exception_executions,
-       ROW_NUMBER() OVER (ORDER BY rs.total_cpu_time DESC) AS cpu_time_rank,
-       ROW_NUMBER() OVER (ORDER BY rs.total_duration DESC) AS duration_rank,
-       ROW_NUMBER() OVER (ORDER BY rs.total_logical_io_reads DESC) AS logical_io_reads_rank,
-       ROW_NUMBER() OVER (ORDER BY rs.total_physical_io_reads DESC) AS physical_io_reads_rank,
-       ROW_NUMBER() OVER (ORDER BY rs.count_executions DESC) AS executions_rank,
-       ROW_NUMBER() OVER (ORDER BY rs.total_query_max_used_memory DESC) AS total_query_max_used_memory_rank,
-       ROW_NUMBER() OVER (ORDER BY rs.total_log_bytes_used DESC) AS total_log_bytes_used_rank,
-       ROW_NUMBER() OVER (ORDER BY rs.total_tempdb_space_used DESC) AS total_tempdb_space_used_rank,
-       ROW_NUMBER() OVER (ORDER BY rs.total_dop DESC) AS total_dop_rank,
-       -- if total_cpu_time for a query is 2 times less than for the immediately higher query in the rank order, do not consider it a top query
-       -- top_cpu_cutoff_indicator = 0 signifies a top query; the query where top_cpu_cutoff_indicator is 1 and any query with lower rank will be filtered out
-       IIF(rs.total_cpu_time * 1. / NULLIF(LEAD(rs.total_cpu_time) OVER (ORDER BY rs.total_cpu_time), 0) < 0.5, 1, 0) AS top_cpu_cutoff_indicator,
-       IIF(rs.total_duration * 1. / NULLIF(LEAD(rs.total_duration) OVER (ORDER BY rs.total_duration), 0) < 0.5, 1, 0) AS top_duration_cutoff_indicator,
-       IIF(rs.total_logical_io_reads * 1. / NULLIF(LEAD(rs.total_logical_io_reads) OVER (ORDER BY rs.total_logical_io_reads), 0) < 0.5, 1, 0) AS top_logical_io_reads_cutoff_indicator,
-       IIF(rs.total_physical_io_reads * 1. / NULLIF(LEAD(rs.total_physical_io_reads) OVER (ORDER BY rs.total_physical_io_reads), 0) < 0.5, 1, 0) AS top_physical_io_reads_cutoff_indicator,
-       IIF(rs.count_executions * 1. / NULLIF(LEAD(rs.count_executions) OVER (ORDER BY rs.count_executions), 0) < 0.5, 1, 0) AS top_executions_cutoff_indicator,
-       IIF(rs.total_query_max_used_memory * 1. / NULLIF(LEAD(rs.total_query_max_used_memory) OVER (ORDER BY rs.total_query_max_used_memory), 0) < 0.5, 1, 0) AS top_memory_cutoff_indicator,
-       IIF(rs.total_log_bytes_used * 1. / NULLIF(LEAD(rs.total_log_bytes_used) OVER (ORDER BY rs.total_log_bytes_used), 0) < 0.5, 1, 0) AS top_log_bytes_cutoff_indicator,
-       IIF(rs.total_tempdb_space_used * 1. / NULLIF(LEAD(rs.total_tempdb_space_used) OVER (ORDER BY rs.total_tempdb_space_used), 0) < 0.5, 1, 0) AS top_tempdb_cutoff_indicator,
-       IIF(rs.total_dop * 1. / NULLIF(LEAD(rs.total_dop) OVER (ORDER BY rs.total_dop), 0) < 0.5, 1, 0) AS top_dop_cutoff_indicator,
-       ws.ranked_wait_categories
-FROM query_runtime_stats AS rs
-LEFT JOIN #query_wait_stats_summary AS ws -- outer join in case wait stats collection is not enabled or waits are not available otherwise
-ON rs.query_hash = ws.query_hash
-),
--- add running sums of cut off indicators along rank order; indicators will remain 0 for top queries, and >0 otherwise
-top_query_rank AS
-(
-SELECT *,
-       SUM(top_cpu_cutoff_indicator) OVER (ORDER BY cpu_time_rank ROWS UNBOUNDED PRECEDING) AS top_cpu_indicator,
-       SUM(top_duration_cutoff_indicator) OVER (ORDER BY duration_rank ROWS UNBOUNDED PRECEDING) AS top_duration_indicator,
-       SUM(top_logical_io_reads_cutoff_indicator) OVER (ORDER BY logical_io_reads_rank ROWS UNBOUNDED PRECEDING) AS top_logical_io_indicator,
-       SUM(top_physical_io_reads_cutoff_indicator) OVER (ORDER BY physical_io_reads_rank ROWS UNBOUNDED PRECEDING) AS top_physical_io_indicator,
-       SUM(top_executions_cutoff_indicator) OVER (ORDER BY executions_rank ROWS UNBOUNDED PRECEDING) AS top_executions_indicator,
-       SUM(top_memory_cutoff_indicator) OVER (ORDER BY total_query_max_used_memory_rank ROWS UNBOUNDED PRECEDING) AS top_memory_indicator,
-       SUM(top_log_bytes_cutoff_indicator) OVER (ORDER BY total_log_bytes_used_rank ROWS UNBOUNDED PRECEDING) AS top_log_bytes_indicator,
-       SUM(top_tempdb_cutoff_indicator) OVER (ORDER BY total_tempdb_space_used_rank ROWS UNBOUNDED PRECEDING) AS top_tempdb_indicator,
-       SUM(top_dop_cutoff_indicator) OVER (ORDER BY total_dop_rank ROWS UNBOUNDED PRECEDING) AS top_dop_indicator
-FROM query_rank
-),
--- restrict to a union of queries that are top queries on some dimension; then, restrict further to top-within-top N queries along any dimension
-top_query AS
-(
-SELECT query_hash,
-       count_queries,
-       query_id,
-       count_plans,
-       plan_id,
-       count_regular_executions,
-       count_aborted_executions,
-       count_exception_executions,
-       cpu_time_rank,
-       duration_rank,
-       logical_io_reads_rank,
-       physical_io_reads_rank,
-       executions_rank,
-       total_query_max_used_memory_rank,
-       total_log_bytes_used_rank,
-       total_tempdb_space_used_rank,
-       total_dop_rank,
-       ranked_wait_categories
-FROM top_query_rank
-WHERE (
-      top_cpu_indicator = 0
-      OR
-      top_duration_indicator = 0
-      OR
-      top_executions_indicator = 0
-      OR
-      top_logical_io_indicator = 0
-      OR
-      top_physical_io_indicator = 0
-      OR
-      top_memory_indicator = 0
-      OR
-      top_log_bytes_indicator = 0
-      OR
-      top_tempdb_indicator = 0
-      OR
-      top_dop_indicator = 0
-      )
-      AND
-      (
-      cpu_time_rank <= @QueryStoreTopQueryCount
-      OR
-      duration_rank <= @QueryStoreTopQueryCount
-      OR
-      executions_rank <= @QueryStoreTopQueryCount
-      OR
-      logical_io_reads_rank <= @QueryStoreTopQueryCount
-      OR
-      physical_io_reads_rank <= @QueryStoreTopQueryCount
-      OR
-      total_query_max_used_memory_rank <= @QueryStoreTopQueryCount
-      OR
-      total_log_bytes_used_rank <= @QueryStoreTopQueryCount
-      OR
-      total_tempdb_space_used_rank <= @QueryStoreTopQueryCount
-      OR
-      total_dop_rank <= @QueryStoreTopQueryCount
-      )
-)
-INSERT INTO @DetectedTip (tip_id, details)
-SELECT 1320 AS tip_id,
-       CONCAT(
-             @NbspCRLF,
-             STRING_AGG(
-                       CAST(CONCAT(
-                                  'query hash: ', CONVERT(varchar(30), query_hash, 1),
-                                  ', query_id: ', CAST(query_id AS varchar(11)), IIF(count_queries > 1, CONCAT(' (+', CAST(count_queries - 1 AS varchar(11)), ')'), ''),
-                                  ', plan_id: ', CAST(plan_id AS varchar(11)), IIF(count_plans > 1, CONCAT(' (+', CAST(count_plans - 1 AS varchar(11)), ')'), ''),
-                                  ', executions: (regular: ', CAST(count_regular_executions AS varchar(11)), ', aborted: ', CAST(count_aborted_executions AS varchar(11)), ', exception: ', CAST(count_exception_executions AS varchar(11)), ')',
-                                  ', CPU time rank: ', CAST(cpu_time_rank AS varchar(11)),
-                                  ', duration rank: ', CAST(duration_rank AS varchar(11)),
-                                  ', executions rank: ', CAST(executions_rank AS varchar(11)),
-                                  ', logical IO reads rank: ', CAST(logical_io_reads_rank AS varchar(11)),
-                                  ', physical IO reads rank: ', CAST(physical_io_reads_rank AS varchar(11)),
-                                  ', max used memory rank: ', CAST(total_query_max_used_memory_rank AS varchar(11)),
-                                  ', log bytes used rank: ', CAST(total_log_bytes_used_rank AS varchar(11)),
-                                  ', tempdb used rank: ', CAST(total_tempdb_space_used_rank AS varchar(11)),
-                                  ', parallelism rank: ', CAST(total_dop_rank AS varchar(11)),
-                                  ', weighted wait categories: ', ISNULL(ranked_wait_categories, '-')
-                                  ) AS nvarchar(max)), @CRLF
-                       )
-                       WITHIN GROUP (ORDER BY duration_rank),
-             @CRLF
-             )
-       AS details
-FROM top_query
-HAVING COUNT(1) > 0
-OPTION (RECOMPILE)
-;
-
--- tempdb data and log size close to maxsize
-
--- get tempdb used (aka reserved) size
-DROP TABLE IF EXISTS #tempdb_space_used;
-
-CREATE TABLE #tempdb_space_used
-(
-database_name sysname NULL,
-database_size varchar(18) NULL,
-unallocated_space varchar(18) NULL,
-reserved varchar(18) NULL,
-data varchar(18) NULL,
-index_size varchar(18) NULL,
-unused varchar(18) NULL
-);
-
--- When not running as server admin and without membership in ##MS_ServerStateReader## we do not have
--- VIEW DATABASE STATE on tempdb, which is required to execute tempdb.sys.sp_spaceused to determine tempdb used space.
--- Silently skipping tip 1340 (tempdb used space) in that case.
-IF EXISTS (
-          SELECT 1
-          FROM tempdb.sys.fn_my_permissions(default, 'DATABASE')
-          WHERE entity_name = 'database'
-                AND
-                permission_name = 'VIEW DATABASE STATE'
-          )
-BEGIN
-    INSERT INTO #tempdb_space_used
-    EXEC tempdb.sys.sp_spaceused @oneresultset = 1;
-
-    IF @@ROWCOUNT <> 1
-        THROW 50020, 'tempdb.sys.sp_spaceused returned the number of rows other than 1.', 1;
-END;
-
-WITH tempdb_file_size AS
-(
-SELECT type_desc AS file_type,
-       SUM(size * 8 / 1024.) AS allocated_size_mb,
-       SUM(max_size * 8 / 1024.) AS max_size_mb,
-       SUM(IIF(type_desc = 'ROWS', 1, NULL)) AS count_files
-FROM tempdb.sys.database_files
-WHERE type_desc IN ('ROWS','LOG')
-GROUP BY type_desc
-),
-tempdb_tip AS
-(
-SELECT tfs.file_type,
-       tt.space_type,
-       tfs.allocated_size_mb,
-       TRY_CAST(LEFT(tsu.reserved, LEN(tsu.reserved) - 3) AS decimal) / 1024. AS used_size_mb,
-       tfs.max_size_mb,
-       tfs.count_files
-FROM tempdb_file_size AS tfs
-INNER JOIN (
-           VALUES ('ROWS', 'allocated'),
-                  ('ROWS', 'used'),
-                  ('LOG', 'allocated')
-           ) AS tt (file_type, space_type)
-ON tfs.file_type = tt.file_type
-LEFT JOIN #tempdb_space_used AS tsu
-ON tfs.file_type = 'ROWS'
-)
-INSERT INTO @DetectedTip (tip_id, details)
-SELECT CASE WHEN file_type = 'ROWS' AND space_type = 'allocated' THEN 1330
-            WHEN file_type = 'ROWS' AND space_type = 'used' THEN 1340
-            WHEN file_type = 'LOG' THEN 1350 
-       END 
-       AS tip_id,
-       CONCAT(
-             @NbspCRLF,
-             'tempdb ', CASE file_type WHEN 'ROWS' THEN 'data' WHEN 'LOG' THEN 'log' END , ' allocated size (MB): ', FORMAT(allocated_size_mb, '#,0.00'),
-             ', tempdb data used size (MB): ' + FORMAT(used_size_mb, '#,0.00'),
-             ', tempdb ', CASE file_type WHEN 'ROWS' THEN 'data' WHEN 'LOG' THEN 'log' END, ' MAXSIZE (MB): ', FORMAT(max_size_mb, '#,0.00'),
-             ', tempdb data files: ' + CAST(count_files AS varchar(11)),
-             @CRLF
-             )
-       AS details
-FROM tempdb_tip
-WHERE (file_type = 'ROWS' AND space_type = 'allocated' AND allocated_size_mb / NULLIF(max_size_mb, 0) > @TempdbDataAllocatedToMaxsizeThresholdRatio)
-      OR
-      (file_type = 'ROWS' AND space_type = 'used' AND used_size_mb / NULLIF(max_size_mb, 0) > @TempdbDataUsedToMaxsizeThresholdRatio)
-      OR
-      (file_type = 'LOG'  AND space_type = 'allocated' AND allocated_size_mb / NULLIF(max_size_mb, 0) > @TempdbLogAllocatedToMaxsizeThresholdRatio)
 ;
 
 -- Workload group workers close to limit
@@ -2403,59 +2582,7 @@ BEGIN
                            );
 END;
 
--- High instance CPU
-WITH
-instance_cpu_snapshot AS
-(
-SELECT end_time,
-       avg_instance_cpu_percent,
-       IIF(avg_instance_cpu_percent > @HighInstanceCPUThresholdPercent, 1, 0) AS high_instance_cpu_indicator
-FROM sys.dm_db_resource_stats
-WHERE @EngineEdition = 5
-),
-pre_packed_instance_cpu_snapshot AS
-(
-SELECT end_time,
-       avg_instance_cpu_percent,
-       high_instance_cpu_indicator,
-       ROW_NUMBER() OVER (ORDER BY end_time) -- row number across all readings, in increasing chronological order
-       -
-       SUM(high_instance_cpu_indicator) OVER (ORDER BY end_time ROWS UNBOUNDED PRECEDING) -- running count of all intervals where log rate exceeded the threshold
-       AS grouping_helper -- this difference remains constant while log rate is above the threshold, and can be used to collapse/pack an interval using aggregation
-FROM instance_cpu_snapshot
-),
-packed_instance_cpu_snapshot AS
-(
-SELECT MIN(end_time) AS min_end_time,
-       MAX(end_time) AS max_end_time,
-       MAX(avg_instance_cpu_percent) AS max_instance_cpu_percent
-FROM pre_packed_instance_cpu_snapshot
-WHERE high_instance_cpu_indicator = 1
-GROUP BY grouping_helper
-HAVING DATEDIFF(second, MIN(end_time), MAX(end_time)) > @HighInstanceCPUMinThresholdSeconds
-),
-instance_cpu_top_stat AS
-(
-SELECT MAX(DATEDIFF(second, min_end_time, max_end_time)) AS top_instance_cpu_duration_seconds,
-       MAX(max_instance_cpu_percent) AS top_instance_cpu_percent,
-       COUNT(1) AS count_high_instance_cpu_intervals
-FROM packed_instance_cpu_snapshot 
-)
-INSERT INTO @DetectedTip (tip_id, details)
-SELECT 1390 AS tip_id,
-       CONCAT(
-             @NbspCRLF,
-             'In the last hour, there were ', count_high_instance_cpu_intervals, 
-             ' interval(s) with instance CPU utilization staying above ', @HighInstanceCPUThresholdPercent, 
-             '% for at least ' , FORMAT(@HighInstanceCPUMinThresholdSeconds, '#,0'),
-             ' seconds. The longest such interval lasted ', FORMAT(top_instance_cpu_duration_seconds, '#,0'),
-             ' seconds, and the maximum instance CPU utilization was ', FORMAT(top_instance_cpu_percent, '#,0.00'),
-             '%.',
-             @CRLF
-             ) AS details
-FROM instance_cpu_top_stat 
-WHERE count_high_instance_cpu_intervals > 0
-;
+END; -- end tips requiring VIEW SERVER STATE
 
 -- Return detected tips
 
@@ -2476,7 +2603,7 @@ IF @JSONOutput = 0
     WHERE dt.tip_id IS NOT NULL
           OR
           @ReturnAllTips = 1
-    ORDER BY confidence_percent DESC;
+    ORDER BY description;
 ELSE IF @JSONOutput = 1
     WITH tips AS -- flatten for JSON output
     (
@@ -2494,8 +2621,40 @@ ELSE IF @JSONOutput = 1
     )
     SELECT *
     FROM tips
-    ORDER BY confidence_percent DESC
+    ORDER BY description
     FOR JSON AUTO;
+
+IF @ViewServerStateIndicator = 0
+BEGIN
+    WITH skipped_tip AS
+    (
+    SELECT CONCAT(COUNT(1), ' potential tips were skipped because of insufficient permissions.') AS Warning,
+           CONCAT(
+                 @NbspCRLF,
+                 STRING_AGG(
+                           CONCAT(
+                                 'tip_id: ', tip_id,
+                                 ', ', tip_name
+                                 ),
+                           @CRLF
+                           )
+                           WITHIN GROUP (ORDER BY tip_name),
+                 @CRLF
+                 )
+           AS skipped_tips
+    FROM @TipDefinition AS td
+    WHERE required_permission = 'VIEW SERVER STATE'
+    HAVING COUNT(1) > 0
+    )
+    SELECT st.Warning,
+           tl.skipped_tips
+    FROM skipped_tip AS st
+    OUTER APPLY (
+                SELECT st.skipped_tips AS [processing-instruction(_)]
+                WHERE st.skipped_tips IS NOT NULL
+                FOR XML PATH (''), TYPE
+                ) tl (skipped_tips)
+END;
 
 PRINT CONCAT(
             'Execution start time: ', @ExecStartTime,
