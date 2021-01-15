@@ -2,7 +2,7 @@
 Returns a set of tips to improve database design, health, and performance in Azure SQL Database.
 For a detailed description and the latest version of the script, see https://aka.ms/sqldbtips
 
-v20210114.1
+v20210115.1
 */
 
 -- Set to 1 to output tips as a JSON value
@@ -147,7 +147,16 @@ DECLARE
 @HighInstanceCPUThresholdPercent decimal(5,2) = 90,
 
 -- 1390: Minimum duration of a high instance CPU period considered significant
-@HighInstanceCPUMinThresholdSeconds int = 300
+@HighInstanceCPUMinThresholdSeconds int = 300,
+
+-- 1400: Minimum change in object cardinality to be considered significant, expressed as a ratio of cardinality at last stats update to current cardinality
+@StaleStatsCardinalityChangeMinDifference decimal(3,2) = 0.5,
+
+-- 1400: The min ratio of mod count to object cardinality to be considered significant
+@StaleStatsMinModificationCountRatio decimal(3,2) = 0.1,
+
+-- 1400: The minimum number of days since last stats update to be considered significant
+@StaleStatsMinAgeThresholdDays smallint = 30
 ;
 
 DECLARE @ExecStartTime datetimeoffset = SYSDATETIMEOFFSET();
@@ -245,7 +254,8 @@ VALUES
 (1360, 'Worker utilization is close to workload group limit',      80, 'https://aka.ms/sqldbtipswiki#tip_id-1360', 'VIEW SERVER STATE'),
 (1370, 'Worker utilization is close to resource pool limit',       80, 'https://aka.ms/sqldbtipswiki#tip_id-1370', 'VIEW SERVER STATE'),
 (1380, 'Notable network connectivity events found',                30, 'https://aka.ms/sqldbtipswiki#tip_id-1380', 'VIEW SERVER STATE'),
-(1390, 'Instance CPU utilization is high',                         60, 'https://aka.ms/sqldbtipswiki#tip_id-1390', 'VIEW DATABASE STATE')
+(1390, 'Instance CPU utilization is high',                         60, 'https://aka.ms/sqldbtipswiki#tip_id-1390', 'VIEW DATABASE STATE'),
+(1400, 'Some statistics may be out of date',                       70, 'https://aka.ms/sqldbtipswiki#tip_id-1400', 'VIEW DATABASE STATE')
 ;
 
 -- MAXDOP
@@ -1227,8 +1237,96 @@ FROM instance_cpu_top_stat
 WHERE count_high_instance_cpu_intervals > 0
 ;
 
--- For tips that follow, VIEW DATABASE STATE is insufficient
--- Determine if we have VIEW SERVER STATE empirically given the absense of metadata to determine that
+-- Stale stats
+WITH
+object_size AS
+(
+SELECT object_id,
+       SUM(row_count) AS object_row_count
+FROM sys.dm_db_partition_stats
+WHERE index_id IN (0,1) -- clustered index or heap
+GROUP BY object_id
+),
+stale_stats AS
+(
+SELECT OBJECT_SCHEMA_NAME(s.object_id) COLLATE DATABASE_DEFAULT AS schema_name,
+       OBJECT_NAME(s.object_id) COLLATE DATABASE_DEFAULT AS object_name,
+       s.name COLLATE DATABASE_DEFAULT AS statistics_name,
+       s.auto_created,
+       s.user_created,
+       s.no_recompute,
+       s.is_temporary,
+       s.is_incremental,
+       s.has_persisted_sample,
+       s.has_filter,
+       sp.last_updated,
+       sp.unfiltered_rows,
+       sp.rows_sampled,
+       os.object_row_count,
+       sp.modification_counter
+FROM sys.stats AS s
+INNER JOIN sys.objects AS o
+ON s.object_id = o.object_id
+INNER JOIN object_size AS os
+ON o.object_id = os.object_id
+CROSS APPLY sys.dm_db_stats_properties(s.object_id, s.stats_id) AS sp
+WHERE (
+      o.is_ms_shipped = 0
+      OR
+      (OBJECT_SCHEMA_NAME(s.object_id) = 'sys' AND o.name LIKE 'plan[_]persist[_]%') -- include Query Store system tables
+      )
+      AND
+      (
+      -- object cardinality has changed substantially since last stats update
+      ABS(ISNULL(sp.unfiltered_rows, 0) - os.object_row_count) / NULLIF(((ISNULL(sp.unfiltered_rows, 0) + os.object_row_count) / 2), 0) > @StaleStatsCardinalityChangeMinDifference
+      OR
+      -- no stats blob created
+      (sp.last_updated IS NULL AND os.object_row_count > 0)
+      OR
+      -- naive: stats for an object with many modifications not updated for a substantial time interval
+      (sp.modification_counter > @StaleStatsMinModificationCountRatio * os.object_row_count AND DATEDIFF(day, sp.last_updated, SYSDATETIME()) > @StaleStatsMinAgeThresholdDays)
+      )
+)
+INSERT INTO @DetectedTip (tip_id, details)
+SELECT 1400 AS tip_id,
+       CONCAT(
+             @NbspCRLF,
+             'Total potentially out of date statistics: ', COUNT(1),
+             REPLICATE(@CRLF, 2),
+             STRING_AGG(
+                       CAST(CONCAT(
+                                  schema_name, '.', 
+                                  object_name, '.', 
+                                  statistics_name, 
+                                  ', last updated: ', ISNULL(FORMAT(last_updated, 's'), '-'), 
+                                  ', last update rows: ', ISNULL(FORMAT(unfiltered_rows, '#,0'), '-'), 
+                                  ', last update sampled rows: ', ISNULL(FORMAT(rows_sampled, '#,0'), '-'), 
+                                  ', current rows: ', FORMAT(object_row_count, '#,0'),
+                                  ', modifications: ', ISNULL(FORMAT(modification_counter, '#,0'), '-'),
+                                  ', attributes: '
+                                  + 
+                                  NULLIF(
+                                        CONCAT_WS(
+                                                 ',',
+                                                 IIF(auto_created = 1, 'auto-created', NULL),
+                                                 IIF(user_created = 1, 'user-created', NULL),
+                                                 IIF(no_recompute = 1, 'no_recompute', NULL),
+                                                 IIF(is_temporary = 1, 'temporary', NULL),
+                                                 IIF(is_incremental = 1, 'incremental', NULL),
+                                                 IIF(has_filter = 1, 'filtered', NULL),
+                                                 IIF(has_persisted_sample = 1, 'persisted sample', NULL)
+                                                 )
+                                        , '')
+                                  ) AS nvarchar(max)), @CRLF
+                       ) WITHIN GROUP (ORDER BY schema_name, object_name, statistics_name),
+             @CRLF
+             )
+       AS details
+FROM stale_stats
+HAVING COUNT(1) > 0
+
+-- For tips that follow, VIEW DATABASE STATE is insufficient.
+-- Determine if we have VIEW SERVER STATE empirically, given the absense of metadata to determine that otherwise.
 BEGIN TRY
     DECLARE @a int = (SELECT 1 FROM sys.dm_os_sys_info);
 END TRY
@@ -2505,7 +2603,7 @@ IF @JSONOutput = 0
     WHERE dt.tip_id IS NOT NULL
           OR
           @ReturnAllTips = 1
-    ORDER BY confidence_percent DESC;
+    ORDER BY description;
 ELSE IF @JSONOutput = 1
     WITH tips AS -- flatten for JSON output
     (
@@ -2523,7 +2621,7 @@ ELSE IF @JSONOutput = 1
     )
     SELECT *
     FROM tips
-    ORDER BY confidence_percent DESC
+    ORDER BY description
     FOR JSON AUTO;
 
 IF @ViewServerStateIndicator = 0
