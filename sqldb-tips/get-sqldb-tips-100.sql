@@ -6,7 +6,7 @@ Returns a set of tips to improve database design, health, and performance in Azu
 For the latest version of the script, see https://aka.ms/sqldbtips
 For detailed description, see https://aka.ms/sqldbtipswiki
 
-v20210116.1
+v20210117.1
 */
 
 -- Set to 1 to output tips as a JSON value
@@ -160,7 +160,13 @@ DECLARE
 @StaleStatsMinModificationCountRatio decimal(3,2) = 0.1,
 
 -- 1400: The minimum number of days since last stats update to be considered significant
-@StaleStatsMinAgeThresholdDays smallint = 30
+@StaleStatsMinAgeThresholdDays smallint = 30,
+
+-- 1410: The minimum number of rows in a table for the lack of indexes to be considered significant
+@NoIndexTablesMinRowCountThreshold int = 500,
+
+-- 1410: The minimum ratio of the number of no-index tables to the total number of tables to be considered significant
+@NoIndexMinTableCountRatio decimal(3,2) = 0.2
 ;
 
 DECLARE @ExecStartTime datetimeoffset = SYSDATETIMEOFFSET();
@@ -269,7 +275,8 @@ VALUES
 (1370, 'Worker utilization is close to resource pool limit',       80, 'https://aka.ms/sqldbtipswiki#tip_id-1370', 'VIEW SERVER STATE',   1),
 (1380, 'Notable network connectivity events found',                30, 'https://aka.ms/sqldbtipswiki#tip_id-1380', 'VIEW SERVER STATE',   1),
 (1390, 'Instance CPU utilization is high',                         60, 'https://aka.ms/sqldbtipswiki#tip_id-1390', 'VIEW DATABASE STATE', 1),
-(1400, 'Some statistics may be out of date',                       70, 'https://aka.ms/sqldbtipswiki#tip_id-1400', 'VIEW DATABASE STATE', 1)
+(1400, 'Some statistics may be out of date',                       70, 'https://aka.ms/sqldbtipswiki#tip_id-1400', 'VIEW DATABASE STATE', 1),
+(1410, 'Many tables do not have any indexes',                      60, 'https://aka.ms/sqldbtipswiki#tip_id-1410', 'VIEW DATABASE STATE', 1)
 ;
 
 -- Top queries
@@ -1350,7 +1357,78 @@ SELECT 1400 AS tip_id,
              )
        AS details
 FROM stale_stats
-HAVING COUNT(1) > 0
+HAVING COUNT(1) > 0;
+
+-- Many tables with no indexes
+IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1410) AND execute_indicator = 1)
+
+WITH
+object_size AS
+(
+SELECT object_id,
+       SUM(row_count) AS object_row_count
+FROM sys.dm_db_partition_stats
+WHERE index_id IN (0,1) -- clustered index or heap
+GROUP BY object_id
+),
+indexed_table AS
+(
+SELECT QUOTENAME(OBJECT_SCHEMA_NAME(t.object_id)) COLLATE DATABASE_DEFAULT AS schema_name,
+       QUOTENAME(t.name) COLLATE DATABASE_DEFAULT AS table_name,
+       IIF(
+          ISNULL(i.no_index_indicator, 0) = 1
+          AND
+          -- exclude small tables
+          os.object_row_count > @NoIndexTablesMinRowCountThreshold,
+          1,
+          0
+          )
+       AS no_index_indicator
+FROM sys.tables AS t
+INNER JOIN object_size AS os
+ON t.object_id = os.object_id
+OUTER APPLY (
+            SELECT TOP (1) 1 AS no_index_indicator
+            FROM sys.indexes AS i
+            WHERE i.object_id = t.object_id
+                  AND
+                  i.type_desc = 'HEAP'
+                  AND
+                  NOT EXISTS (
+                             SELECT 1
+                             FROM sys.indexes AS ni
+                             WHERE ni.object_id = i.object_id
+                                   AND
+                                   ni.type_desc IN ('NONCLUSTERED','XML','SPATIAL','NONCLUSTERED COLUMNSTORE','NONCLUSTERED HASH')
+                             )
+            ) AS i
+WHERE t.is_ms_shipped = 0
+)
+INSERT INTO @DetectedTip (tip_id, details)
+SELECT 1410 AS tip_id,
+       CONCAT(
+             @NbspCRLF,
+             'total tables: ', FORMAT(COUNT(1), '#,0'),
+             @CRLF,
+             'tables with ', FORMAT(@NoIndexTablesMinRowCountThreshold, '#,0'), 
+             ' or more rows and no indexes: ', FORMAT(SUM(no_index_indicator), '#,0'),
+             @CRLF, @CRLF,
+             STRING_AGG(
+                       IIF(
+                          no_index_indicator = 1,
+                          CONCAT(
+                                schema_name, '.', table_name
+                                ),
+                          NULL
+                          ),
+                       @CRLF 
+                       ),
+             @CRLF
+             )
+       AS details
+FROM indexed_table
+HAVING SUM(no_index_indicator) > @NoIndexMinTableCountRatio * COUNT(1)
+;
 
 -- For tips that follow, VIEW DATABASE STATE is insufficient.
 -- Determine if we have VIEW SERVER STATE empirically, given the absense of metadata to determine that otherwise.
