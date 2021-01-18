@@ -3,7 +3,7 @@ Returns a set of tips to improve database design, health, and performance in Azu
 For the latest version of the script, see https://aka.ms/sqldbtips
 For detailed description, see https://aka.ms/sqldbtipswiki
 
-v20210117.2
+v20210118.1
 */
 
 -- Set to 1 to output tips as a JSON value
@@ -180,6 +180,9 @@ DECLARE @DetectedTip table (
                            tip_id smallint NOT NULL PRIMARY KEY,
                            details nvarchar(max) NULL
                            );
+DECLARE @LockTimeoutSkippedTip table (
+                                     tip_id smallint NOT NULL PRIMARY KEY
+                                     );
 
 DECLARE @CRLF char(2) = CONCAT(CHAR(13), CHAR(10)),
         @NbspCRLF nchar(3) = CONCAT(NCHAR(160), NCHAR(13), NCHAR(10));
@@ -187,7 +190,7 @@ DECLARE @CRLF char(2) = CONCAT(CHAR(13), CHAR(10)),
 DECLARE @ViewServerStateIndicator bit = 1;
 
 SET NOCOUNT ON;
-SET LOCK_TIMEOUT 5000; -- abort if another request holds a lock on metadata for too long
+SET LOCK_TIMEOUT 3000; -- abort if another request holds a lock on metadata for too long
 
 BEGIN TRY
 
@@ -270,6 +273,8 @@ VALUES
 -- Top queries
 IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1320) AND execute_indicator = 1)
 BEGIN
+
+BEGIN TRY
 
 DROP TABLE IF EXISTS #query_wait_stats_summary;
 
@@ -502,6 +507,12 @@ INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1320 AS tip_id,
        CONCAT(
              @NbspCRLF,
+             'server: ', @@SERVERNAME,
+             ', database: ', DB_NAME(),
+             ', SLO: ', rg.slo_name,
+             ', logical database GUID: ', rg.logical_database_guid,
+             ', physical database GUID: ', rg.physical_database_guid,
+             @CRLF, @CRLF,
              STRING_AGG(
                        CAST(CONCAT(
                                   'query hash: ', CONVERT(varchar(30), query_hash, 1),
@@ -525,8 +536,22 @@ SELECT 1320 AS tip_id,
              )
        AS details
 FROM top_query
+CROSS JOIN sys.dm_user_db_resource_governance AS rg
+WHERE rg.database_id = DB_ID()
+GROUP BY rg.slo_name,
+         rg.logical_database_guid,
+         rg.physical_database_guid
 HAVING COUNT(1) > 0
 OPTION (RECOMPILE);
+
+END TRY
+BEGIN CATCH
+    IF ERROR_NUMBER() = 1222
+        INSERT INTO @LockTimeoutSkippedTip (tip_id)
+        VALUES (1320);
+    ELSE
+        THROW;
+END CATCH;
 
 END;
 
@@ -570,6 +595,8 @@ ON (t.tip_id = 1000 AND mc.value NOT BETWEEN 1 AND 8 AND (mc.value_for_secondary
 -- Compatibility level
 IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1030) AND execute_indicator = 1)
 
+BEGIN TRY
+
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1030 AS tip_id,
        CONCAT(@NbspCRLF, 'Present database compatibility level: ', CAST(d.compatibility_level AS varchar(3)), @CRLF) AS details
@@ -584,8 +611,19 @@ GROUP BY d.compatibility_level
 HAVING COUNT(1) > 1 -- Consider the last two compat levels (including the one possibly in preview) as current
 ;
 
+END TRY
+BEGIN CATCH
+    IF ERROR_NUMBER() = 1222
+        INSERT INTO @LockTimeoutSkippedTip (tip_id)
+        VALUES (1030);
+    ELSE
+        THROW;
+END CATCH;
+
 -- Auto-stats
 IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1040,1050) AND execute_indicator = 1)
+
+BEGIN TRY
 
 WITH autostats AS
 (
@@ -609,19 +647,40 @@ INSERT INTO @DetectedTip (tip_id)
 SELECT tip_id
 FROM autostats;
 
+END TRY
+BEGIN CATCH
+    IF ERROR_NUMBER() = 1222
+        INSERT INTO @LockTimeoutSkippedTip (tip_id)
+        VALUES (1040),(1050);
+    ELSE
+        THROW;
+END CATCH;
+
 -- RCSI
 IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1060) AND execute_indicator = 1)
+
+BEGIN TRY
 
 INSERT INTO @DetectedTip (tip_id)
 SELECT 1060 AS tip_id
 FROM sys.databases
 WHERE name = DB_NAME()
       AND
-      is_read_committed_snapshot_on = 0
-;
+      is_read_committed_snapshot_on = 0;
+
+END TRY
+BEGIN CATCH
+    IF ERROR_NUMBER() = 1222
+        INSERT INTO @LockTimeoutSkippedTip (tip_id)
+        VALUES (1060);
+    ELSE
+        THROW;
+END CATCH;
 
 -- Query Store state
 IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1070,1071,1072) AND execute_indicator = 1)
+
+BEGIN TRY
 
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT t.tip_id,
@@ -656,19 +715,40 @@ ON (t.tip_id = 1070 AND qso.actual_state_desc = 'OFF')
 WHERE DATABASEPROPERTYEX(DB_NAME(), 'Updateability') = 'READ_WRITE' -- only produce this on primary
 ;
 
+END TRY
+BEGIN CATCH
+    IF ERROR_NUMBER() = 1222
+        INSERT INTO @LockTimeoutSkippedTip (tip_id)
+        VALUES (1070),(1071),(1072);
+    ELSE
+        THROW;
+END CATCH;
+
 -- Auto-shrink
 IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1080) AND execute_indicator = 1)
+
+BEGIN TRY
 
 INSERT INTO @DetectedTip (tip_id)
 SELECT 1080 AS tip_id
 FROM sys.databases
 WHERE name = DB_NAME()
       AND
-      is_auto_shrink_on = 1
-;
+      is_auto_shrink_on = 1;
+
+END TRY
+BEGIN CATCH
+    IF ERROR_NUMBER() = 1222
+        INSERT INTO @LockTimeoutSkippedTip (tip_id)
+        VALUES (1080);
+    ELSE
+        THROW;
+END CATCH;
 
 -- Btree indexes with uniqueidentifier leading column
 IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1100) AND execute_indicator = 1)
+
+BEGIN TRY
 
 WITH 
 object_size AS
@@ -748,8 +828,16 @@ SELECT 1100 AS tip_id,
              )
        AS details
 FROM guid_index
-HAVING COUNT(1) > 0
-;
+HAVING COUNT(1) > 0;
+
+END TRY
+BEGIN CATCH
+    IF ERROR_NUMBER() = 1222
+        INSERT INTO @LockTimeoutSkippedTip (tip_id)
+        VALUES (1100);
+    ELSE
+        THROW;
+END CATCH;
 
 -- FLGP auto-tuning
 INSERT INTO @DetectedTip (tip_id, details)
@@ -970,6 +1058,8 @@ WHERE is_primary_replica = 0 -- redo details only available on secondary
 -- Paused resumable index DDL
 IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1280) AND execute_indicator = 1)
 
+BEGIN TRY
+
 WITH resumable_index_op AS
 (
 SELECT OBJECT_SCHEMA_NAME(iro.object_id) AS schema_name,
@@ -1016,13 +1106,23 @@ SELECT 1280 AS tip_id,
              @CRLF
              )
 FROM resumable_index_op 
-HAVING COUNT(1) > 0
-;
+HAVING COUNT(1) > 0;
+
+END TRY
+BEGIN CATCH
+    IF ERROR_NUMBER() = 1222
+        INSERT INTO @LockTimeoutSkippedTip (tip_id)
+        VALUES (1280);
+    ELSE
+        THROW;
+END CATCH;
 
 -- Geo-replication health
 IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1300) AND execute_indicator = 1)
 
-WITH 
+BEGIN TRY
+
+WITH
 geo_replication_link_details AS
 (
 SELECT STRING_AGG(
@@ -1060,13 +1160,23 @@ SELECT 1300 AS tip_id,
              details,
              @CRLF
              )
-FROM geo_replication_link_details
-;
+FROM geo_replication_link_details;
+
+END TRY
+BEGIN CATCH
+    IF ERROR_NUMBER() = 1222
+        INSERT INTO @LockTimeoutSkippedTip (tip_id)
+        VALUES (1300);
+    ELSE
+        THROW;
+END CATCH;
 
 -- Last partitions are not empty
 IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1310) AND execute_indicator = 1)
 
-WITH 
+BEGIN TRY
+
+WITH
 partition_stat AS
 (
 SELECT object_id,
@@ -1117,12 +1227,22 @@ SELECT 1310 AS tip_id,
              )
        AS details
 FROM object_last_partition
-HAVING COUNT(1) > 0
-;
+HAVING COUNT(1) > 0;
+
+END TRY
+BEGIN CATCH
+    IF ERROR_NUMBER() = 1222
+        INSERT INTO @LockTimeoutSkippedTip (tip_id)
+        VALUES (1310);
+    ELSE
+        THROW;
+END CATCH;
 
 -- tempdb data and log size close to maxsize
 IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1330,1340,1350) AND execute_indicator = 1)
 BEGIN
+
+BEGIN TRY
 
 -- get tempdb used (aka reserved) size
 DROP TABLE IF EXISTS #tempdb_space_used;
@@ -1206,6 +1326,15 @@ WHERE (file_type = 'ROWS' AND space_type = 'allocated' AND allocated_size_mb / N
       OR
       (file_type = 'LOG'  AND space_type = 'allocated' AND allocated_size_mb / NULLIF(max_size_mb, 0) > @TempdbLogAllocatedToMaxsizeThresholdRatio);
 
+END TRY
+BEGIN CATCH
+    IF ERROR_NUMBER() = 1222
+        INSERT INTO @LockTimeoutSkippedTip (tip_id)
+        VALUES (1330),(1340),(1350);
+    ELSE
+        THROW;
+END CATCH;
+
 END;
 
 -- High instance CPU
@@ -1266,6 +1395,8 @@ WHERE count_high_instance_cpu_intervals > 0
 
 -- Stale stats
 IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1400) AND execute_indicator = 1)
+
+BEGIN TRY
 
 WITH
 object_size AS
@@ -1354,8 +1485,19 @@ SELECT 1400 AS tip_id,
 FROM stale_stats
 HAVING COUNT(1) > 0;
 
+END TRY
+BEGIN CATCH
+    IF ERROR_NUMBER() = 1222
+        INSERT INTO @LockTimeoutSkippedTip (tip_id)
+        VALUES (1400);
+    ELSE
+        THROW;
+END CATCH;
+
 -- Many tables with no indexes
 IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1410) AND execute_indicator = 1)
+
+BEGIN TRY
 
 WITH
 object_size AS
@@ -1422,8 +1564,16 @@ SELECT 1410 AS tip_id,
              )
        AS details
 FROM indexed_table
-HAVING SUM(no_index_indicator) > @NoIndexMinTableCountRatio * COUNT(1)
-;
+HAVING SUM(no_index_indicator) > @NoIndexMinTableCountRatio * COUNT(1);
+
+END TRY
+BEGIN CATCH
+    IF ERROR_NUMBER() = 1222
+        INSERT INTO @LockTimeoutSkippedTip (tip_id)
+        VALUES (1410);
+    ELSE
+        THROW;
+END CATCH;
 
 -- For tips that follow, VIEW DATABASE STATE is insufficient.
 -- Determine if we have VIEW SERVER STATE empirically, given the absense of metadata to determine that otherwise.
@@ -1541,6 +1691,8 @@ WHERE (count_memgrant_waiter > 0 OR count_memgrant_timeout > 0)
 -- Little used nonclustered indexes
 IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1170) AND execute_indicator = 1)
 
+BEGIN TRY
+
 WITH index_usage AS
 (
 SELECT QUOTENAME(OBJECT_SCHEMA_NAME(o.object_id)) COLLATE DATABASE_DEFAULT AS schema_name, 
@@ -1599,11 +1751,21 @@ SELECT 1170 AS tip_id,
              ) AS details
 FROM index_usage_agg AS iua
 CROSS JOIN sys.dm_os_sys_info AS si
-WHERE iua.details IS NOT NULL
-;
+WHERE iua.details IS NOT NULL;
+
+END TRY
+BEGIN CATCH
+    IF ERROR_NUMBER() = 1222
+        INSERT INTO @LockTimeoutSkippedTip (tip_id)
+        VALUES (1170);
+    ELSE
+        THROW;
+END CATCH;
 
 -- Compression candidates
 IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1180) AND execute_indicator = 1)
+
+BEGIN TRY
 
 WITH 
 recent_cpu_usage AS
@@ -1775,8 +1937,19 @@ CROSS JOIN sys.dm_os_sys_info AS si
 WHERE ppga.details IS NOT NULL
 ;
 
+END TRY
+BEGIN CATCH
+    IF ERROR_NUMBER() = 1222
+        INSERT INTO @LockTimeoutSkippedTip (tip_id)
+        VALUES (1180);
+    ELSE
+        THROW;
+END CATCH;
+
 -- Missing indexes
 IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1210) AND execute_indicator = 1)
+
+BEGIN TRY
 
 WITH missing_index_agg AS
 (
@@ -1815,8 +1988,16 @@ SELECT 1210 AS tip_id,
              ) AS details
 FROM missing_index_agg AS mia
 CROSS JOIN sys.dm_os_sys_info AS si
-WHERE mia.details IS NOT NULL
-;
+WHERE mia.details IS NOT NULL;
+
+END TRY
+BEGIN CATCH
+    IF ERROR_NUMBER() = 1222
+        INSERT INTO @LockTimeoutSkippedTip (tip_id)
+        VALUES (1210);
+    ELSE
+        THROW;
+END CATCH;
 
 -- Data IO reaching user workload group SLO limit, or significant IO RG impact at user workload group level
 IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1230,1240) AND execute_indicator = 1)
@@ -2235,6 +2416,8 @@ WHERE i.count_io_rg_impact_intervals > 0
 -- Large PVS
 IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1270) AND execute_indicator = 1)
 
+BEGIN TRY
+
 WITH 
 db_allocated_size AS
 (
@@ -2289,11 +2472,21 @@ SELECT 1270 AS tip_id,
              @CRLF
              )
        AS details
-FROM pvs_db_stats
-;
+FROM pvs_db_stats;
+
+END TRY
+BEGIN CATCH
+    IF ERROR_NUMBER() = 1222
+        INSERT INTO @LockTimeoutSkippedTip (tip_id)
+        VALUES (1270);
+    ELSE
+        THROW;
+END CATCH;
 
 -- CCI candidates
 IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1290) AND execute_indicator = 1)
+
+BEGIN TRY
 
 WITH
 candidate_partition AS
@@ -2432,8 +2625,16 @@ SELECT 1290 AS tip_id,
              ) AS details
 FROM cci_candidate_details AS ccd
 CROSS JOIN sys.dm_os_sys_info AS si
-WHERE ccd.details IS NOT NULL
-;
+WHERE ccd.details IS NOT NULL;
+
+END TRY
+BEGIN CATCH
+    IF ERROR_NUMBER() = 1222
+        INSERT INTO @LockTimeoutSkippedTip (tip_id)
+        VALUES (1290);
+    ELSE
+        THROW;
+END CATCH;
 
 -- Workload group workers close to limit
 IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1360) AND execute_indicator = 1)
@@ -2584,6 +2785,8 @@ WHERE count_high_worker_intervals > 0
 IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1380) AND execute_indicator = 1)
 BEGIN
 
+BEGIN TRY
+
 DECLARE @crb TABLE (
                    event_time datetime NOT NULL,
                    record xml NOT NULL
@@ -2709,6 +2912,15 @@ BEGIN
                            );
 END;
 
+END TRY
+BEGIN CATCH
+    IF ERROR_NUMBER() = 1222
+        INSERT INTO @LockTimeoutSkippedTip (tip_id)
+        VALUES (1380);
+    ELSE
+        THROW;
+END CATCH;
+
 END;
 
 END; -- end tips requiring VIEW SERVER STATE
@@ -2753,12 +2965,39 @@ ELSE IF @JSONOutput = 1
     ORDER BY description
     FOR JSON AUTO;
 
+-- Output skipped tips, if any
 IF @ViewServerStateIndicator = 0
+   OR
+   EXISTS (SELECT 1 FROM @TipDefinition WHERE execute_indicator = 0)
+   OR
+   EXISTS (SELECT 1 FROM @LockTimeoutSkippedTip)
 BEGIN
-    WITH skipped_tip AS
+    WITH tip AS
     (
-    SELECT CONCAT(COUNT(1), ' potential tips were skipped because of insufficient permissions.') AS warning,
-           'https://aka.ms/sqldbtipswiki#permissions' AS additional_info_url,
+    SELECT td.tip_id,
+           td.tip_name,
+           CASE WHEN @ViewServerStateIndicator = 0 AND td.required_permission = 'VIEW SERVER STATE' THEN 'insufficient permissions'
+                WHEN td.execute_indicator = 0 THEN 'user-specified exclusions'
+                WHEN st.tip_id IS NOT NULL THEN 'lock timeout'
+                ELSE NULL
+           END
+           AS skipped_reason
+    FROM @TipDefinition AS td
+    LEFT JOIN @LockTimeoutSkippedTip AS st
+    ON td.tip_id = st.tip_id
+    ),
+    skipped_tip AS
+    (
+    SELECT CONCAT(
+                 COUNT(1),
+                 ' tip(s) were skipped because of ',
+                 skipped_reason
+                 ) AS warning,
+           CASE skipped_reason WHEN 'insufficient permissions' THEN 'https://aka.ms/sqldbtipswiki#permissions'
+                               WHEN 'user-specified exclusions' THEN 'https://aka.ms/sqldbtipswiki#tip-exclusions'
+                               WHEN 'lock timeout' THEN 'https://aka.ms/sqldbtipswiki#how-it-works'
+           END
+           AS additional_info_url,
            CONCAT(
                  @NbspCRLF,
                  STRING_AGG(
@@ -2772,8 +3011,9 @@ BEGIN
                  @CRLF
                  )
            AS skipped_tips
-    FROM @TipDefinition AS td
-    WHERE required_permission = 'VIEW SERVER STATE'
+    FROM tip
+    WHERE skipped_reason IS NOT NULL
+    GROUP BY skipped_reason
     HAVING COUNT(1) > 0
     )
     SELECT st.warning,
