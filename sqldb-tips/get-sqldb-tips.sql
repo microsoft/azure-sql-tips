@@ -3,7 +3,7 @@ Returns a set of tips to improve database design, health, and performance in Azu
 For the latest version of the script, see https://aka.ms/sqldbtips
 For detailed description, see https://aka.ms/sqldbtipswiki
 
-v20210118.1
+v20210118.2
 */
 
 -- Set to 1 to output tips as a JSON value
@@ -230,7 +230,7 @@ VALUES
 (1, 1030, 'Use the latest database compatibility level',              70, 'https://aka.ms/sqldbtipswiki#tip_id-1030', 'VIEW DATABASE STATE'),
 (1, 1040, 'Enable auto-create statistics',                            95, 'https://aka.ms/sqldbtipswiki#tip_id-1040', 'VIEW DATABASE STATE'),
 (1, 1050, 'Enable auto-update statistics',                            95, 'https://aka.ms/sqldbtipswiki#tip_id-1050', 'VIEW DATABASE STATE'),
-(1, 1060, 'Enable RCSI',                                              80, 'https://aka.ms/sqldbtipswiki#tip_id-1060', 'VIEW DATABASE STATE'),
+(1, 1060, 'Enable Read Committed Snapshot Isolation (RCSI)',          80, 'https://aka.ms/sqldbtipswiki#tip_id-1060', 'VIEW DATABASE STATE'),
 (1, 1070, 'Enable Query Store',                                       90, 'https://aka.ms/sqldbtipswiki#tip_id-1070', 'VIEW DATABASE STATE'),
 (1, 1071, 'Change Query Store operation mode to read-write',          90, 'https://aka.ms/sqldbtipswiki#tip_id-1071', 'VIEW DATABASE STATE'),
 (1, 1072, 'Change Query Store capture mode from NONE to AUTO/ALL',    90, 'https://aka.ms/sqldbtipswiki#tip_id-1072', 'VIEW DATABASE STATE'),
@@ -1219,7 +1219,7 @@ SELECT 1310 AS tip_id,
                                   'total partitions: ', FORMAT(partition_count, '#,0'), ', ',
                                   'partition number: ', FORMAT(partition_number, '#,0'), ', ',
                                   'partition rows: ', FORMAT(partition_rows, '#,0'), ', ',
-                                  'partition size (MB): ', FORMAT(partition_size_mb, '#,0.00'), ', '
+                                  'partition size (MB): ', FORMAT(partition_size_mb, '#,0.00')
                                   ) AS nvarchar(max)), @CRLF
                        )
                        WITHIN GROUP (ORDER BY schema_name, object_name, partition_number),
@@ -1279,8 +1279,8 @@ END;
 WITH tempdb_file_size AS
 (
 SELECT type_desc AS file_type,
-       SUM(size * 8 / 1024.) AS allocated_size_mb,
-       SUM(max_size * 8 / 1024.) AS max_size_mb,
+       SUM(CAST(size AS bigint) * 8 / 1024.) AS allocated_size_mb,
+       SUM(CAST(max_size AS bigint) * 8 / 1024.) AS max_size_mb,
        SUM(IIF(type_desc = 'ROWS', 1, NULL)) AS count_files
 FROM tempdb.sys.database_files
 WHERE type_desc IN ('ROWS','LOG')
@@ -2421,7 +2421,7 @@ BEGIN TRY
 WITH 
 db_allocated_size AS
 (
-SELECT SUM(size * 8.) AS db_allocated_size_kb
+SELECT SUM(CAST(size AS bigint) * 8.) AS db_allocated_size_kb
 FROM sys.database_files
 WHERE type_desc = 'ROWS'
 ),

@@ -6,7 +6,7 @@ Returns a set of tips to improve database design, health, and performance in Azu
 For the latest version of the script, see https://aka.ms/sqldbtips
 For detailed description, see https://aka.ms/sqldbtipswiki
 
-v20210118.1
+v20210118.2
 */
 
 -- Set to 1 to output tips as a JSON value
@@ -1225,7 +1225,7 @@ SELECT 1310 AS tip_id,
                                   'total partitions: ', FORMAT(partition_count, '#,0'), ', ',
                                   'partition number: ', FORMAT(partition_number, '#,0'), ', ',
                                   'partition rows: ', FORMAT(partition_rows, '#,0'), ', ',
-                                  'partition size (MB): ', FORMAT(partition_size_mb, '#,0.00'), ', '
+                                  'partition size (MB): ', FORMAT(partition_size_mb, '#,0.00')
                                   ) AS nvarchar(max)), @CRLF
                        ),
              @CRLF
@@ -1284,8 +1284,8 @@ END;
 WITH tempdb_file_size AS
 (
 SELECT type_desc AS file_type,
-       SUM(size * 8 / 1024.) AS allocated_size_mb,
-       SUM(max_size * 8 / 1024.) AS max_size_mb,
+       SUM(CAST(size AS bigint) * 8 / 1024.) AS allocated_size_mb,
+       SUM(CAST(max_size AS bigint) * 8 / 1024.) AS max_size_mb,
        SUM(IIF(type_desc = 'ROWS', 1, NULL)) AS count_files
 FROM tempdb.sys.database_files
 WHERE type_desc IN ('ROWS','LOG')
@@ -2424,7 +2424,7 @@ BEGIN TRY
 WITH 
 db_allocated_size AS
 (
-SELECT SUM(size * 8.) AS db_allocated_size_kb
+SELECT SUM(CAST(size AS bigint) * 8.) AS db_allocated_size_kb
 FROM sys.database_files
 WHERE type_desc = 'ROWS'
 ),
