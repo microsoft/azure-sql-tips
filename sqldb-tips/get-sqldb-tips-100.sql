@@ -6,7 +6,7 @@ Returns a set of tips to improve database design, health, and performance in Azu
 For the latest version of the script, see https://aka.ms/sqldbtips
 For detailed description, see https://aka.ms/sqldbtipswiki
 
-v20210118.2
+v20210120.1
 */
 
 -- Set to 1 to output tips as a JSON value
@@ -2012,7 +2012,6 @@ SELECT wgh.snapshot_time,
        wgh.duration_ms,
        wgh.delta_reads_issued / (wgh.duration_ms / 1000.) AS read_iops,
        wgh.delta_writes_issued / (wgh.duration_ms / 1000.) AS write_iops, -- this is commonly zero, most writes are background writes to data files
-       (wgh.reads_throttled - LAG(wgh.reads_throttled) OVER (ORDER BY snapshot_time)) / (wgh.duration_ms / 1000.) AS read_iops_throttled, -- SQL IO RG throttling, not storage throttling
        (wgh.delta_read_bytes / (wgh.duration_ms / 1000.)) / 1024. / 1024 AS read_throughput_mbps,
        wgh.delta_background_writes / (wgh.duration_ms / 1000.) AS background_write_iops, -- checkpoint, lazy writer, PVS
        (wgh.delta_background_write_bytes / (wgh.duration_ms / 1000.)) / 1024. / 1024 AS background_write_throughput_mbps,
@@ -2052,7 +2051,6 @@ SELECT SUM(duration_ms) OVER (ORDER BY (SELECT 'no order')) / 60000 AS recent_hi
        snapshot_time,
        read_iops,
        write_iops,
-       read_iops_throttled,
        background_write_iops,
        delta_read_stall_queued_ms,
        delta_read_stall_ms,
@@ -2070,7 +2068,6 @@ SELECT SUM(duration_ms) OVER (ORDER BY (SELECT 'no order')) / 60000 AS recent_hi
        SUM(significant_io_rg_impact_indicator) OVER (ORDER BY snapshot_time ROWS UNBOUNDED PRECEDING)
        AS impact_grouping_helper
 FROM io_rg_snapshot
-WHERE read_iops_throttled IS NOT NULL -- discard the earliest row where the difference with previous snapshot is not defined
 ),
 -- each row is an interval where IOPS was continuously at limit, with aggregated IO stats
 packed_io_rg_snapshot_limit AS
@@ -2079,7 +2076,7 @@ SELECT MIN(recent_history_duration_minutes) AS recent_history_duration_minutes,
        MIN(snapshot_time) AS min_snapshot_time,
        MAX(snapshot_time) AS max_snapshot_time,
        AVG(duration_ms) AS avg_snapshot_duration_ms,
-       SUM(delta_read_stall_queued_ms) AS total_read_throttled_time_ms,
+       SUM(delta_read_stall_queued_ms) AS total_read_queued_time_ms,
        SUM(delta_read_stall_ms) AS total_read_time_ms,
        AVG(read_iops) AS avg_read_iops,
        MAX(read_iops) AS max_read_iops,
@@ -2087,8 +2084,6 @@ SELECT MIN(recent_history_duration_minutes) AS recent_history_duration_minutes,
        MAX(write_iops) AS max_write_iops,
        AVG(background_write_iops) AS avg_background_write_iops,
        MAX(background_write_iops) AS max_background_write_iops,
-       AVG(read_iops_throttled) AS avg_read_iops_throttled,
-       MAX(read_iops_throttled) AS max_read_iops_throttled,
        AVG(read_throughput_mbps) AS avg_read_throughput_mbps,
        MAX(read_throughput_mbps) AS max_read_throughput_mbps,
        AVG(background_write_throughput_mbps) AS avg_background_write_throughput_mbps,
@@ -2105,7 +2100,7 @@ SELECT MIN(recent_history_duration_minutes) AS recent_history_duration_minutes,
        MIN(snapshot_time) AS min_snapshot_time,
        MAX(snapshot_time) AS max_snapshot_time,
        AVG(duration_ms) AS avg_snapshot_duration_ms,
-       SUM(delta_read_stall_queued_ms) AS total_read_throttled_time_ms,
+       SUM(delta_read_stall_queued_ms) AS total_read_queued_time_ms,
        SUM(delta_read_stall_ms) AS total_read_time_ms,
        AVG(read_iops) AS avg_read_iops,
        MAX(read_iops) AS max_read_iops,
@@ -2113,8 +2108,6 @@ SELECT MIN(recent_history_duration_minutes) AS recent_history_duration_minutes,
        MAX(write_iops) AS max_write_iops,
        AVG(background_write_iops) AS avg_background_write_iops,
        MAX(background_write_iops) AS max_background_write_iops,
-       AVG(read_iops_throttled) AS avg_read_iops_throttled,
-       MAX(read_iops_throttled) AS max_read_iops_throttled,
        AVG(read_throughput_mbps) AS avg_read_throughput_mbps,
        MAX(read_throughput_mbps) AS max_read_throughput_mbps,
        AVG(background_write_throughput_mbps) AS avg_background_write_throughput_mbps,
@@ -2131,7 +2124,7 @@ SELECT MIN(recent_history_duration_minutes) AS recent_history_duration_minutes,
        MAX(DATEDIFF(second, min_snapshot_time, max_snapshot_time) + avg_snapshot_duration_ms / 1000.) AS longest_io_rg_at_limit_duration_seconds,
        COUNT(1) AS count_io_rg_at_limit_intervals,
        SUM(total_read_time_ms) AS total_read_time_ms,
-       SUM(total_read_throttled_time_ms) AS total_read_throttled_time_ms,
+       SUM(total_read_queued_time_ms) AS total_read_queued_time_ms,
        AVG(avg_read_iops) AS avg_read_iops,
        MAX(max_read_iops) AS max_read_iops,
        AVG(avg_write_iops) AS avg_write_iops,
@@ -2152,7 +2145,7 @@ SELECT MIN(recent_history_duration_minutes) AS recent_history_duration_minutes,
        MAX(DATEDIFF(second, min_snapshot_time, max_snapshot_time) + avg_snapshot_duration_ms / 1000.) AS longest_io_rg_impact_duration_seconds,
        COUNT(1) AS count_io_rg_impact_intervals,
        SUM(total_read_time_ms) AS total_read_time_ms,
-       SUM(total_read_throttled_time_ms) AS total_read_throttled_time_ms,
+       SUM(total_read_queued_time_ms) AS total_read_queued_time_ms,
        AVG(avg_read_iops) AS avg_read_iops,
        MAX(max_read_iops) AS max_read_iops,
        AVG(avg_write_iops) AS avg_write_iops,
@@ -2171,11 +2164,11 @@ SELECT 1230 AS tip_id,
              @NbspCRLF,
              'In the last ', recent_history_duration_minutes,
              ' minutes, there were ', count_io_rg_at_limit_intervals, 
-             ' time interval(s) when total data IO approached the workload group (database-level) IOPS limit of the service objective, ', FORMAT(primary_group_max_io, '#,0'), ' IOPS.', @CRLF,
-             'Across these intervals, aggregate IO statistics were: ', @CRLF,
+             ' time interval(s) when total data IO approached the workload group (database-level) IOPS limit of the service objective, ', FORMAT(primary_group_max_io, '#,0'), ' IOPS.', @CRLF,  @CRLF,
+             'Aggregated across these intervals, IO statistics were: ', @CRLF, @CRLF,
              'longest interval duration: ', FORMAT(longest_io_rg_at_limit_duration_seconds, '#,0'), ' seconds; ', @CRLF,
              'total read IO time: ', FORMAT(total_read_time_ms, '#,0'), ' milliseconds; ', @CRLF,
-             'total throttled read IO time: ', FORMAT(total_read_throttled_time_ms, '#,0'), ' milliseconds; ', @CRLF,
+             'total queued read IO time: ', FORMAT(total_read_queued_time_ms, '#,0'), ' milliseconds; ', @CRLF,
              'average read IOPS: ', FORMAT(avg_read_iops, '#,0'), '; ', @CRLF,
              'maximum read IOPS: ', FORMAT(max_read_iops, '#,0'), '; ', @CRLF,
              'average write IOPS: ', FORMAT(avg_write_iops, '#,0'), '; ', @CRLF,
@@ -2197,11 +2190,11 @@ SELECT 1240 AS tip_id,
              @NbspCRLF,
              'In the last ', recent_history_duration_minutes,
              ' minutes, there were ', count_io_rg_impact_intervals, 
-             ' time interval(s) when workload group (database-level) resource governance for the selected service objective was significantly delaying IO.', @CRLF,
-             'Across these intervals, aggregate IO statistics were: ', @CRLF,
+             ' time interval(s) when workload group (database-level) resource governance for the selected service objective was significantly delaying IO.', @CRLF, @CRLF,
+             'Aggregated across these intervals, IO statistics were: ', @CRLF, @CRLF,
              'longest interval duration: ', FORMAT(longest_io_rg_impact_duration_seconds, '#,0'), ' seconds; ', @CRLF,
              'total read IO time: ', FORMAT(total_read_time_ms, '#,0'), ' milliseconds; ', @CRLF,
-             'total throttled read IO time: ', FORMAT(total_read_throttled_time_ms, '#,0'), ' milliseconds; ', @CRLF,
+             'total queued read IO time: ', FORMAT(total_read_queued_time_ms, '#,0'), ' milliseconds; ', @CRLF,
              'average read IOPS: ', FORMAT(avg_read_iops, '#,0'), '; ', @CRLF,
              'maximum read IOPS: ', FORMAT(max_read_iops, '#,0'), '; ', @CRLF,
              'average write IOPS: ', FORMAT(avg_write_iops, '#,0'), '; ', @CRLF,
@@ -2229,7 +2222,6 @@ SELECT rph.snapshot_time,
        rph.duration_ms,
        rph.delta_read_io_issued / (rph.duration_ms / 1000.) AS read_iops,
        rph.delta_write_io_issued / (rph.duration_ms / 1000.) AS write_iops, -- this is commonly zero, most writes are background writes to data files
-       rph.delta_read_io_throttled / (rph.duration_ms / 1000.) AS read_iops_throttled, -- SQL IO RG throttling, not storage throttling
        (rph.delta_read_bytes / (rph.duration_ms / 1000.)) / 1024. / 1024 AS read_throughput_mbps,
        rph.delta_read_io_stall_queued_ms, -- time spent in SQL IO RG
        rph.delta_read_io_stall_ms, -- total time spent completing the IO, including SQL IO RG time
@@ -2270,7 +2262,6 @@ SELECT SUM(duration_ms) OVER (ORDER BY (SELECT 'no order')) / 60000 AS recent_hi
        snapshot_time,
        read_iops,
        write_iops,
-       read_iops_throttled,
        delta_read_io_stall_queued_ms,
        delta_read_io_stall_ms,
        read_throughput_mbps,
@@ -2294,14 +2285,12 @@ SELECT MIN(recent_history_duration_minutes) AS recent_history_duration_minutes,
        MIN(snapshot_time) AS min_snapshot_time,
        MAX(snapshot_time) AS max_snapshot_time,
        AVG(duration_ms) AS avg_snapshot_duration_ms,
-       SUM(delta_read_io_stall_queued_ms) AS total_read_throttled_time_ms,
+       SUM(delta_read_io_stall_queued_ms) AS total_read_queued_time_ms,
        SUM(delta_read_io_stall_ms) AS total_read_time_ms,
        AVG(read_iops) AS avg_read_iops,
        MAX(read_iops) AS max_read_iops,
        AVG(write_iops) AS avg_write_iops,
        MAX(write_iops) AS max_write_iops,
-       AVG(read_iops_throttled) AS avg_read_iops_throttled,
-       MAX(read_iops_throttled) AS max_read_iops_throttled,
        AVG(read_throughput_mbps) AS avg_read_throughput_mbps,
        MAX(read_throughput_mbps) AS max_read_throughput_mbps,
        MIN(pool_max_io) AS pool_max_io
@@ -2316,14 +2305,12 @@ SELECT MIN(recent_history_duration_minutes) AS recent_history_duration_minutes,
        MIN(snapshot_time) AS min_snapshot_time,
        MAX(snapshot_time) AS max_snapshot_time,
        AVG(duration_ms) AS avg_snapshot_duration_ms,
-       SUM(delta_read_io_stall_queued_ms) AS total_read_throttled_time_ms,
+       SUM(delta_read_io_stall_queued_ms) AS total_read_queued_time_ms,
        SUM(delta_read_io_stall_ms) AS total_read_time_ms,
        AVG(read_iops) AS avg_read_iops,
        MAX(read_iops) AS max_read_iops,
        AVG(write_iops) AS avg_write_iops,
        MAX(write_iops) AS max_write_iops,
-       AVG(read_iops_throttled) AS avg_read_iops_throttled,
-       MAX(read_iops_throttled) AS max_read_iops_throttled,
        AVG(read_throughput_mbps) AS avg_read_throughput_mbps,
        MAX(read_throughput_mbps) AS max_read_throughput_mbps,
        MIN(pool_max_io) AS pool_max_io
@@ -2338,7 +2325,7 @@ SELECT MIN(recent_history_duration_minutes) AS recent_history_duration_minutes,
        MAX(DATEDIFF(second, min_snapshot_time, max_snapshot_time) + avg_snapshot_duration_ms / 1000.) AS longest_io_rg_at_limit_duration_seconds,
        COUNT(1) AS count_io_rg_at_limit_intervals,
        SUM(total_read_time_ms) AS total_read_time_ms,
-       SUM(total_read_throttled_time_ms) AS total_read_throttled_time_ms,
+       SUM(total_read_queued_time_ms) AS total_read_queued_time_ms,
        AVG(avg_read_iops) AS avg_read_iops,
        MAX(max_read_iops) AS max_read_iops,
        AVG(avg_write_iops) AS avg_write_iops,
@@ -2355,7 +2342,7 @@ SELECT MIN(recent_history_duration_minutes) AS recent_history_duration_minutes,
        MAX(DATEDIFF(second, min_snapshot_time, max_snapshot_time) + avg_snapshot_duration_ms / 1000.) AS longest_io_rg_impact_duration_seconds,
        COUNT(1) AS count_io_rg_impact_intervals,
        SUM(total_read_time_ms) AS total_read_time_ms,
-       SUM(total_read_throttled_time_ms) AS total_read_throttled_time_ms,
+       SUM(total_read_queued_time_ms) AS total_read_queued_time_ms,
        AVG(avg_read_iops) AS avg_read_iops,
        MAX(max_read_iops) AS max_read_iops,
        AVG(avg_write_iops) AS avg_write_iops,
@@ -2370,11 +2357,11 @@ SELECT 1250 AS tip_id,
              @NbspCRLF,
              'In the last ', l.recent_history_duration_minutes,
              ' minutes, there were ', l.count_io_rg_at_limit_intervals, 
-             ' time interval(s) when total data IO approached the resource pool IOPS limit of the service objective ', IIF(dso.service_objective = 'ElasticPool', CONCAT('for elastic pool ', QUOTENAME(dso.elastic_pool_name)), ''), ', ', FORMAT(l.pool_max_io, '#,0'), ' IOPS.', @CRLF,
-             'Across these intervals, aggregate IO statistics were: ', @CRLF,
+             ' time interval(s) when total data IO approached the resource pool IOPS limit of the service objective ', IIF(dso.service_objective = 'ElasticPool', CONCAT('for elastic pool ', QUOTENAME(dso.elastic_pool_name)), ''), ', ', FORMAT(l.pool_max_io, '#,0'), ' IOPS.', @CRLF, @CRLF,
+             'Aggregated across these intervals, IO statistics were: ', @CRLF, @CRLF,
              'longest interval duration: ', FORMAT(l.longest_io_rg_at_limit_duration_seconds, '#,0'), ' seconds; ', @CRLF,
              'total read IO time: ', FORMAT(l.total_read_time_ms, '#,0'), ' milliseconds; ', @CRLF,
-             'total throttled read IO time: ', FORMAT(l.total_read_throttled_time_ms, '#,0'), ' milliseconds; ', @CRLF,
+             'total queued read IO time: ', FORMAT(l.total_read_queued_time_ms, '#,0'), ' milliseconds; ', @CRLF,
              'average read IOPS: ', FORMAT(l.avg_read_iops, '#,0'), '; ', @CRLF,
              'maximum read IOPS: ', FORMAT(l.max_read_iops, '#,0'), '; ', @CRLF,
              'average write IOPS: ', FORMAT(l.avg_write_iops, '#,0'), '; ', @CRLF,
@@ -2395,11 +2382,11 @@ SELECT 1260 AS tip_id,
              @NbspCRLF,
              'In the last ', i.recent_history_duration_minutes,
              ' minutes, there were ', i.count_io_rg_impact_intervals, 
-             ' time interval(s) when resource pool resource governance for the selected service objective was significantly delaying IO', IIF(dso.service_objective = 'ElasticPool', CONCAT(' for elastic pool ', QUOTENAME(dso.elastic_pool_name)), ''), '.', @CRLF,
-             'Across these intervals, aggregate IO statistics were: ', @CRLF,
+             ' time interval(s) when resource pool resource governance for the selected service objective was significantly delaying IO', IIF(dso.service_objective = 'ElasticPool', CONCAT(' for elastic pool ', QUOTENAME(dso.elastic_pool_name)), ''), '.', @CRLF, @CRLF,
+             'Aggregated across these intervals, IO statistics were: ', @CRLF, @CRLF,
              'longest interval duration: ', FORMAT(i.longest_io_rg_impact_duration_seconds, '#,0'), ' seconds; ', @CRLF,
              'total read IO time: ', FORMAT(i.total_read_time_ms, '#,0'), ' milliseconds; ', @CRLF,
-             'total throttled read IO time: ', FORMAT(i.total_read_throttled_time_ms, '#,0'), ' milliseconds; ', @CRLF,
+             'total queued read IO time: ', FORMAT(i.total_read_queued_time_ms, '#,0'), ' milliseconds; ', @CRLF,
              'average read IOPS: ', FORMAT(i.avg_read_iops, '#,0'), '; ', @CRLF,
              'maximum read IOPS: ', FORMAT(i.max_read_iops, '#,0'), '; ', @CRLF,
              'average write IOPS: ', FORMAT(i.avg_write_iops, '#,0'), '; ', @CRLF,
@@ -2886,11 +2873,23 @@ WHERE sce.event_time > DATEADD(minute, -@NotableNetworkEventsIntervalMinutes, CU
       sce.remote_host <> '<named pipe>' -- ignore SQL DB internal connections
       AND
       (
-      (sce.record_type = 'Error' AND NOT (sce.sni_consumer_error = 18456 AND sce.state = 123))
+      (
+      sce.record_type = 'Error'
+      AND
+      NOT (sce.sni_consumer_error = 18456 AND sce.state = 123) -- SSMS noise
+      )
       OR
-      (sce.record_type = 'LoginTimers' AND sce.login_total_time_ms > @NotableNetworkEventsSlowLoginThresholdMs)
+      (
+      sce.record_type = 'LoginTimers'
+      AND
+      sce.login_total_time_ms > @NotableNetworkEventsSlowLoginThresholdMs
+      )
       OR
-      (sce.record_type = 'ConnectionClose' AND (sce.physical_connection_is_killed = 1 OR sce.disconnect_due_to_read_error = 1 OR sce.network_error_found_in_input_stream = 1 OR sce.error_found_before_login = 1 OR sce.session_is_killed = 1))
+      (
+      sce.record_type = 'ConnectionClose'
+      AND
+      (sce.physical_connection_is_killed = 1 OR sce.disconnect_due_to_read_error = 1 OR sce.network_error_found_in_input_stream = 1 OR sce.error_found_before_login = 1 OR sce.session_is_killed = 1)
+      )
       )
 ;
 
