@@ -6,7 +6,7 @@ Returns a set of tips to improve database design, health, and performance in Azu
 For the latest version of the script, see https://aka.ms/sqldbtips
 For detailed description, see https://aka.ms/sqldbtipswiki
 
-v20210120.1
+v20210121.1
 */
 
 -- Set to 1 to output tips as a JSON value
@@ -242,14 +242,14 @@ VALUES
 (1, 1030, 'Use the latest database compatibility level',              70, 'https://aka.ms/sqldbtipswiki#tip_id-1030', 'VIEW DATABASE STATE'),
 (1, 1040, 'Enable auto-create statistics',                            95, 'https://aka.ms/sqldbtipswiki#tip_id-1040', 'VIEW DATABASE STATE'),
 (1, 1050, 'Enable auto-update statistics',                            95, 'https://aka.ms/sqldbtipswiki#tip_id-1050', 'VIEW DATABASE STATE'),
-(1, 1060, 'Enable RCSI',                                              80, 'https://aka.ms/sqldbtipswiki#tip_id-1060', 'VIEW DATABASE STATE'),
+(1, 1060, 'Enable Read Committed Snapshot Isolation (RCSI)',          80, 'https://aka.ms/sqldbtipswiki#tip_id-1060', 'VIEW DATABASE STATE'),
 (1, 1070, 'Enable Query Store',                                       90, 'https://aka.ms/sqldbtipswiki#tip_id-1070', 'VIEW DATABASE STATE'),
 (1, 1071, 'Change Query Store operation mode to read-write',          90, 'https://aka.ms/sqldbtipswiki#tip_id-1071', 'VIEW DATABASE STATE'),
 (1, 1072, 'Change Query Store capture mode from NONE to AUTO/ALL',    90, 'https://aka.ms/sqldbtipswiki#tip_id-1072', 'VIEW DATABASE STATE'),
-(1, 1080, 'Disable AUTO_SHRINK',                                      99, 'https://aka.ms/sqldbtipswiki#tip_id-1080', 'VIEW DATABASE STATE'),
+(1, 1080, 'Disable AUTO_SHRINK',                                      95, 'https://aka.ms/sqldbtipswiki#tip_id-1080', 'VIEW DATABASE STATE'),
 (1, 1100, 'Avoid GUID leading columns in btree indexes',              60, 'https://aka.ms/sqldbtipswiki#tip_id-1100', 'VIEW DATABASE STATE'),
 (1, 1110, 'Enable FLGP auto-tuning',                                  95, 'https://aka.ms/sqldbtipswiki#tip_id-1110', 'VIEW DATABASE STATE'),
-(1, 1120, 'Used data size is close to MAXSIZE',                       80, 'https://aka.ms/sqldbtipswiki#tip_id-1120', 'VIEW DATABASE STATE'),
+(1, 1120, 'Used data size is close to MAXSIZE',                       95, 'https://aka.ms/sqldbtipswiki#tip_id-1120', 'VIEW DATABASE STATE'),
 (1, 1130, 'Allocated data size is close to MAXSIZE',                  60, 'https://aka.ms/sqldbtipswiki#tip_id-1130', 'VIEW DATABASE STATE'),
 (1, 1140, 'Allocated data size is much larger than used data size',   50, 'https://aka.ms/sqldbtipswiki#tip_id-1140', 'VIEW DATABASE STATE'),
 (1, 1150, 'Recent CPU throttling found',                              90, 'https://aka.ms/sqldbtipswiki#tip_id-1150', 'VIEW SERVER STATE'),
@@ -1222,8 +1222,8 @@ SELECT 1310 AS tip_id,
                        CAST(CONCAT(
                                   'schema: ', schema_name, ', ',
                                   'object: ', object_name, ', ',
-                                  'total partitions: ', FORMAT(partition_count, '#,0'), ', ',
-                                  'partition number: ', FORMAT(partition_number, '#,0'), ', ',
+                                  'partition number: ', FORMAT(partition_number, '#,0'),
+                                  ' out of  ', FORMAT(partition_count, '#,0'), ', ',
                                   'partition rows: ', FORMAT(partition_rows, '#,0'), ', ',
                                   'partition size (MB): ', FORMAT(partition_size_mb, '#,0.00')
                                   ) AS nvarchar(max)), @CRLF
@@ -1886,19 +1886,22 @@ SELECT object_id,
                                             PARTITION BY object_id, index_name, new_compression_type
                                             ORDER BY partition_number
                                             ) 
-       AS interval_group -- used to pack contiguous partition intervals for the same object, index, compression type
+       AS interval_group, -- used to pack contiguous partition intervals for the same object, index, compression type
+       SUM(partition_size_mb) OVER (PARTITION BY object_id) AS object_size_mb
 FROM partition_compression
 WHERE new_compression_type IS NOT NULL
 ),
 packed_partition_group AS
 (
-SELECT object_id,
-       index_name,
-       index_type,
+SELECT QUOTENAME(OBJECT_SCHEMA_NAME(object_id)) COLLATE DATABASE_DEFAULT AS schema_name,
+       QUOTENAME(OBJECT_NAME(object_id)) COLLATE DATABASE_DEFAULT AS object_name,
+       QUOTENAME(index_name) COLLATE DATABASE_DEFAULT AS index_name,
+       index_type COLLATE DATABASE_DEFAULT AS index_type,
        present_compression_type,
        new_compression_type,
        SUM(partition_size_mb) AS partition_range_size_mb,
-       CONCAT(MIN(partition_number), '-', MAX(partition_number)) AS partition_range
+       CONCAT(MIN(partition_number), '-', MAX(partition_number)) AS partition_range,
+       MIN(object_size_mb) AS object_size_mb
 FROM partition_compression_interval
 GROUP BY object_id,
          index_name,
@@ -1912,10 +1915,11 @@ packed_partition_group_agg AS
 (
 SELECT STRING_AGG(
                  CAST(CONCAT(
-                            'schema: ', QUOTENAME(OBJECT_SCHEMA_NAME(object_id)) COLLATE DATABASE_DEFAULT,
-                            ', object: ', QUOTENAME(OBJECT_NAME(object_id)) COLLATE DATABASE_DEFAULT, 
-                            ', index: ' +  QUOTENAME(index_name) COLLATE DATABASE_DEFAULT, 
-                            ', index type: ', index_type COLLATE DATABASE_DEFAULT,
+                            'schema: ', schema_name,
+                            ', object: ', object_name, 
+                            ', index: ' +  index_name, 
+                            ', index type: ', index_type,
+                            ', object size (MB): ', FORMAT(object_size_mb, 'N'), 
                             ', partition range: ', partition_range, 
                             ', partition range size (MB): ', FORMAT(partition_range_size_mb, 'N'), 
                             ', present compression type: ', present_compression_type,
@@ -2190,7 +2194,7 @@ SELECT 1240 AS tip_id,
              @NbspCRLF,
              'In the last ', recent_history_duration_minutes,
              ' minutes, there were ', count_io_rg_impact_intervals, 
-             ' time interval(s) when workload group (database-level) resource governance for the selected service objective was significantly delaying IO.', @CRLF, @CRLF,
+             ' time interval(s) when workload group (database-level) resource governance for the selected service objective was significantly delaying IO requests.', @CRLF, @CRLF,
              'Aggregated across these intervals, IO statistics were: ', @CRLF, @CRLF,
              'longest interval duration: ', FORMAT(longest_io_rg_impact_duration_seconds, '#,0'), ' seconds; ', @CRLF,
              'total read IO time: ', FORMAT(total_read_time_ms, '#,0'), ' milliseconds; ', @CRLF,
@@ -2382,7 +2386,7 @@ SELECT 1260 AS tip_id,
              @NbspCRLF,
              'In the last ', i.recent_history_duration_minutes,
              ' minutes, there were ', i.count_io_rg_impact_intervals, 
-             ' time interval(s) when resource pool resource governance for the selected service objective was significantly delaying IO', IIF(dso.service_objective = 'ElasticPool', CONCAT(' for elastic pool ', QUOTENAME(dso.elastic_pool_name)), ''), '.', @CRLF, @CRLF,
+             ' time interval(s) when resource pool resource governance for the selected service objective was significantly delaying IO requests', IIF(dso.service_objective = 'ElasticPool', CONCAT(' for elastic pool ', QUOTENAME(dso.elastic_pool_name)), ''), '.', @CRLF, @CRLF,
              'Aggregated across these intervals, IO statistics were: ', @CRLF, @CRLF,
              'longest interval duration: ', FORMAT(i.longest_io_rg_impact_duration_seconds, '#,0'), ' seconds; ', @CRLF,
              'total read IO time: ', FORMAT(i.total_read_time_ms, '#,0'), ' milliseconds; ', @CRLF,
