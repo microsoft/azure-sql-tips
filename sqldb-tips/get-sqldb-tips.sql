@@ -3,7 +3,7 @@ Returns a set of tips to improve database design, health, and performance in Azu
 For the latest version of the script, see https://aka.ms/sqldbtips
 For detailed description, see https://aka.ms/sqldbtipswiki
 
-v20210122.1
+v20210123.1
 */
 
 -- Set to 1 to output tips as a JSON value
@@ -2507,13 +2507,15 @@ IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1290) AND execute_indic
 BEGIN TRY
 
 WITH
-candidate_partition AS
+any_partition AS
 (
 SELECT p.object_id,
        p.index_id,
        p.partition_number,
        p.rows,
-       SUM(ps.used_page_count) * 8 / 1024. AS partition_size_mb
+       p.data_compression_desc,
+       ps.used_page_count * 8 / 1024. AS partition_size_mb,
+       MAX(IIF(p.data_compression_desc IN ('COLUMNSTORE','COLUMNSTORE_ARCHIVE'), 1, 0)) OVER (PARTITION BY p.object_id) AS object_has_columnstore_indexes
 FROM sys.partitions AS p
 INNER JOIN sys.dm_db_partition_stats AS ps
 ON p.partition_id = ps.partition_id
@@ -2521,30 +2523,19 @@ ON p.partition_id = ps.partition_id
    p.object_id = ps.object_id
    AND
    p.index_id = ps.index_id
-WHERE p.data_compression_desc IN ('NONE','ROW','PAGE')
+),
+candidate_partition AS
+(
+SELECT object_id,
+       index_id,
+       partition_number,
+       rows,
+       partition_size_mb
+FROM any_partition
+WHERE data_compression_desc IN ('NONE','ROW','PAGE')
       AND
-      -- exclude all partitions of tables with NCCI, and all NCI partitions of tables with CCI
-      NOT EXISTS (
-                 SELECT 1
-                 FROM sys.partitions AS pncci
-                 WHERE pncci.object_id = p.object_id
-                       AND
-                       pncci.index_id NOT IN (0,1)
-                       AND
-                       pncci.data_compression_desc IN ('COLUMNSTORE','COLUMNSTORE_ARCHIVE')
-                 UNION
-                 SELECT 1
-                 FROM sys.partitions AS pnci
-                 WHERE pnci.object_id = p.object_id
-                       AND
-                       pnci.index_id = 1
-                       AND
-                       pnci.data_compression_desc IN ('COLUMNSTORE','COLUMNSTORE_ARCHIVE')
-                 )
-GROUP BY p.object_id,
-         p.index_id,
-         p.partition_number,
-         p.rows
+      -- an object with any kind of columnstore is not a candidate
+      object_has_columnstore_indexes = 0
 ),
 table_operational_stats AS -- summarize operational stats for heap, CI, and NCI
 (
