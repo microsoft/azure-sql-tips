@@ -3,7 +3,7 @@ Returns a set of tips to improve database design, health, and performance in Azu
 For the latest version of the script, see https://aka.ms/sqldbtips
 For detailed description, see https://aka.ms/sqldbtipswiki
 
-v20210123.1
+v20210123.2
 */
 
 -- Set to 1 to output tips as a JSON value
@@ -2515,7 +2515,8 @@ SELECT p.object_id,
        p.rows,
        p.data_compression_desc,
        ps.used_page_count * 8 / 1024. AS partition_size_mb,
-       MAX(IIF(p.data_compression_desc IN ('COLUMNSTORE','COLUMNSTORE_ARCHIVE'), 1, 0)) OVER (PARTITION BY p.object_id) AS object_has_columnstore_indexes
+       MAX(IIF(p.data_compression_desc IN ('COLUMNSTORE','COLUMNSTORE_ARCHIVE'), 1, 0)) OVER (PARTITION BY p.object_id) AS object_has_columnstore_indexes,
+       MAX(IIF(p.rows >= 102400, 1, 0)) OVER (PARTITION BY p.object_id) AS object_has_columnstore_compressible_partitions
 FROM sys.partitions AS p
 INNER JOIN sys.dm_db_partition_stats AS ps
 ON p.partition_id = ps.partition_id
@@ -2536,6 +2537,8 @@ WHERE data_compression_desc IN ('NONE','ROW','PAGE')
       AND
       -- an object with any kind of columnstore is not a candidate
       object_has_columnstore_indexes = 0
+      AND
+      object_has_columnstore_compressible_partitions = 1
 ),
 table_operational_stats AS -- summarize operational stats for heap, CI, and NCI
 (
@@ -2554,7 +2557,7 @@ GROUP BY cp.object_id
 cci_candidate_table AS
 (
 SELECT QUOTENAME(OBJECT_SCHEMA_NAME(t.object_id)) COLLATE DATABASE_DEFAULT AS schema_name,
-       QUOTENAME(t.name)  COLLATE DATABASE_DEFAULT AS table_name,
+       QUOTENAME(t.name) COLLATE DATABASE_DEFAULT AS table_name,
        tos.table_size_mb,
        tos.partition_count,
        tos.lead_insert_count AS insert_count,
@@ -2579,15 +2582,6 @@ WHERE i.type IN (0,1) -- clustered index or heap
       tos.table_size_mb > @CCICandidateMinSizeGB / 1024. -- consider sufficiently large tables only
       AND
       t.is_ms_shipped = 0
-      AND
-      -- at least one partition is columnstore compressible
-      EXISTS (
-             SELECT 1
-             FROM candidate_partition AS cp
-             WHERE cp.object_id = t.object_id
-                   AND
-                   cp.rows >= 102400
-             )
       AND
       -- conservatively require a CCI candidate to have no updates, seeks, or lookups
       tos.leaf_update_count = 0
