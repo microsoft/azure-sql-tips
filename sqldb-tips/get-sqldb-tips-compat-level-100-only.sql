@@ -6,7 +6,7 @@ Returns a set of tips to improve database design, health, and performance in Azu
 For the latest version of the script, see https://aka.ms/sqldbtips
 For detailed description, see https://aka.ms/sqldbtipswiki
 
-v20210121.1
+v20210123.2
 */
 
 -- Set to 1 to output tips as a JSON value
@@ -77,6 +77,9 @@ DECLARE
 
 -- 1180: Minimum required number of resource stats sampling intervals
 @CompressionMinResourceStatSamples smallint = 30,
+
+-- 1180: Minimum ratio of compressible to not compressible allocations for compression to be worthwhile
+@CompressionMinEligibleRatio decimal(3,2) = 0.3,
 
 -- 1190: Minimum log rate as percentage of SLO limit that is considered as being too high
 @HighLogRateThresholdPercent decimal(5,2) = 80,
@@ -1785,7 +1788,10 @@ SELECT p.object_id,
        p.index_id,
        p.partition_number,
        p.data_compression_desc,
-       SUM(ps.used_page_count) * 8 / 1024. AS partition_size_mb
+       SUM(ps.used_page_count) * 8 / 1024. AS total_partition_size_mb,
+       SUM(ps.in_row_used_page_count) * 8 / 1024. AS in_row_partition_size_mb,
+       SUM(ps.row_overflow_used_page_count) * 8 / 1024. AS row_overflow_partition_size_mb,
+       SUM(ps.lob_used_page_count) * 8 / 1024. AS lob_partition_size_mb
 FROM sys.partitions AS p
 INNER JOIN sys.dm_db_partition_stats AS ps
 ON p.partition_id = ps.partition_id
@@ -1805,7 +1811,11 @@ SELECT o.object_id,
        i.name AS index_name,
        i.type_desc AS index_type,
        p.partition_number,
-       p.partition_size_mb,
+       p.total_partition_size_mb,
+       p.in_row_partition_size_mb,
+       p.row_overflow_partition_size_mb,
+       p.lob_partition_size_mb,
+       p.in_row_partition_size_mb / NULLIF(p.total_partition_size_mb, 0) AS compression_eligible_ratio, -- overflow and LOB allocations are not compressible
        p.data_compression_desc,
        ios.leaf_update_count * 1. / NULLIF((ios.range_scan_count + ios.leaf_insert_count + ios.leaf_delete_count + ios.leaf_update_count + ios.leaf_page_merge_count + ios.singleton_lookup_count), 0) AS update_ratio,
        ios.range_scan_count * 1. / NULLIF((ios.range_scan_count + ios.leaf_insert_count + ios.leaf_delete_count + ios.leaf_update_count + ios.leaf_page_merge_count + ios.singleton_lookup_count), 0) AS scan_ratio
@@ -1841,7 +1851,11 @@ SELECT ps.object_id,
        ps.index_name,
        ps.index_type,
        ps.partition_number,
-       ps.partition_size_mb,
+       ps.total_partition_size_mb,
+       ps.in_row_partition_size_mb,
+       ps.row_overflow_partition_size_mb,
+       ps.lob_partition_size_mb,
+       SUM(ps.total_partition_size_mb) OVER (PARTITION BY object_id) AS object_size_mb,
        ps.data_compression_desc AS present_compression_type,
        CASE WHEN -- do not choose page compression when no index stats are available and update_ratio and scan_ratio are NULL, due to low confidence
                  (
@@ -1857,10 +1871,14 @@ SELECT ps.object_id,
                  rcu.avg_cpu_percent < @CompressionCPUHeadroomThreshold1 -- there is ample CPU headroom
                  AND 
                  rcu.recent_cpu_minutes > @CompressionMinResourceStatSamples -- there is a sufficient number of CPU usage stats
+                 AND
+                 ps.compression_eligible_ratio >= @CompressionMinEligibleRatio
             THEN 'PAGE'
             WHEN rcu.avg_cpu_percent < @CompressionCPUHeadroomThreshold2 -- there is some CPU headroom
                  AND 
                  rcu.recent_cpu_minutes > @CompressionMinResourceStatSamples -- there is a sufficient number of CPU usage stats
+                 AND
+                 ps.compression_eligible_ratio >= @CompressionMinEligibleRatio
             THEN 'ROW'
             WHEN rcu.avg_cpu_percent > @CompressionCPUHeadroomThreshold2 -- there is no CPU headroom, can't use compression
                  AND 
@@ -1881,13 +1899,16 @@ SELECT object_id,
        present_compression_type,
        new_compression_type,
        partition_number,
-       partition_size_mb,
+       total_partition_size_mb,
+       in_row_partition_size_mb,
+       row_overflow_partition_size_mb,
+       lob_partition_size_mb,
+       object_size_mb,
        partition_number - ROW_NUMBER() OVER (
                                             PARTITION BY object_id, index_name, new_compression_type
                                             ORDER BY partition_number
                                             ) 
-       AS interval_group, -- used to pack contiguous partition intervals for the same object, index, compression type
-       SUM(partition_size_mb) OVER (PARTITION BY object_id) AS object_size_mb
+       AS interval_group -- used to pack contiguous partition intervals for the same object, index, compression type
 FROM partition_compression
 WHERE new_compression_type IS NOT NULL
 ),
@@ -1899,7 +1920,10 @@ SELECT QUOTENAME(OBJECT_SCHEMA_NAME(object_id)) COLLATE DATABASE_DEFAULT AS sche
        index_type COLLATE DATABASE_DEFAULT AS index_type,
        present_compression_type,
        new_compression_type,
-       SUM(partition_size_mb) AS partition_range_size_mb,
+       SUM(total_partition_size_mb) AS partition_range_total_size_mb,
+       SUM(in_row_partition_size_mb) AS partition_range_in_row_size_mb,
+       SUM(row_overflow_partition_size_mb) AS partition_range_row_overflow_size_mb,
+       SUM(lob_partition_size_mb) AS partition_range_lob_size_mb,
        CONCAT(MIN(partition_number), '-', MAX(partition_number)) AS partition_range,
        MIN(object_size_mb) AS object_size_mb
 FROM partition_compression_interval
@@ -1916,13 +1940,16 @@ packed_partition_group_agg AS
 SELECT STRING_AGG(
                  CAST(CONCAT(
                             'schema: ', schema_name,
-                            ', object: ', object_name, 
-                            ', index: ' +  index_name, 
+                            ', object: ', object_name,
+                            ', index: ' +  index_name,
                             ', index type: ', index_type,
-                            ', object size (MB): ', FORMAT(object_size_mb, 'N'), 
-                            ', partition range: ', partition_range, 
-                            ', partition range size (MB): ', FORMAT(partition_range_size_mb, 'N'), 
-                            ', present compression type: ', present_compression_type,
+                            ', object size (MB): ', FORMAT(object_size_mb, 'N'),
+                            ', partition range: ', partition_range,
+                            ', partition range total size (MB): ', FORMAT(partition_range_total_size_mb, 'N'),
+                            ' (in-row: ', FORMAT(partition_range_in_row_size_mb, 'N'),
+                            ', row overflow: ', FORMAT(partition_range_row_overflow_size_mb, 'N'),
+                            ', LOB: ', FORMAT(partition_range_lob_size_mb, 'N'),
+                            '), present compression type: ', present_compression_type,
                             ', suggested compression type: ', new_compression_type
                             ) AS nvarchar(max)), @CRLF
                  )
@@ -2483,13 +2510,16 @@ IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1290) AND execute_indic
 BEGIN TRY
 
 WITH
-candidate_partition AS
+any_partition AS
 (
 SELECT p.object_id,
        p.index_id,
        p.partition_number,
        p.rows,
-       SUM(ps.used_page_count) * 8 / 1024. AS partition_size_mb
+       p.data_compression_desc,
+       ps.used_page_count * 8 / 1024. AS partition_size_mb,
+       MAX(IIF(p.data_compression_desc IN ('COLUMNSTORE','COLUMNSTORE_ARCHIVE'), 1, 0)) OVER (PARTITION BY p.object_id) AS object_has_columnstore_indexes,
+       MAX(IIF(p.rows >= 102400, 1, 0)) OVER (PARTITION BY p.object_id) AS object_has_columnstore_compressible_partitions
 FROM sys.partitions AS p
 INNER JOIN sys.dm_db_partition_stats AS ps
 ON p.partition_id = ps.partition_id
@@ -2497,30 +2527,21 @@ ON p.partition_id = ps.partition_id
    p.object_id = ps.object_id
    AND
    p.index_id = ps.index_id
-WHERE p.data_compression_desc IN ('NONE','ROW','PAGE')
+),
+candidate_partition AS
+(
+SELECT object_id,
+       index_id,
+       partition_number,
+       rows,
+       partition_size_mb
+FROM any_partition
+WHERE data_compression_desc IN ('NONE','ROW','PAGE')
       AND
-      -- exclude all partitions of tables with NCCI, and all NCI partitions of tables with CCI
-      NOT EXISTS (
-                 SELECT 1
-                 FROM sys.partitions AS pncci
-                 WHERE pncci.object_id = p.object_id
-                       AND
-                       pncci.index_id NOT IN (0,1)
-                       AND
-                       pncci.data_compression_desc IN ('COLUMNSTORE','COLUMNSTORE_ARCHIVE')
-                 UNION
-                 SELECT 1
-                 FROM sys.partitions AS pnci
-                 WHERE pnci.object_id = p.object_id
-                       AND
-                       pnci.index_id = 1
-                       AND
-                       pnci.data_compression_desc IN ('COLUMNSTORE','COLUMNSTORE_ARCHIVE')
-                 )
-GROUP BY p.object_id,
-         p.index_id,
-         p.partition_number,
-         p.rows
+      -- an object with any kind of columnstore is not a candidate
+      object_has_columnstore_indexes = 0
+      AND
+      object_has_columnstore_compressible_partitions = 1
 ),
 table_operational_stats AS -- summarize operational stats for heap, CI, and NCI
 (
@@ -2539,7 +2560,7 @@ GROUP BY cp.object_id
 cci_candidate_table AS
 (
 SELECT QUOTENAME(OBJECT_SCHEMA_NAME(t.object_id)) COLLATE DATABASE_DEFAULT AS schema_name,
-       QUOTENAME(t.name)  COLLATE DATABASE_DEFAULT AS table_name,
+       QUOTENAME(t.name) COLLATE DATABASE_DEFAULT AS table_name,
        tos.table_size_mb,
        tos.partition_count,
        tos.lead_insert_count AS insert_count,
@@ -2564,15 +2585,6 @@ WHERE i.type IN (0,1) -- clustered index or heap
       tos.table_size_mb > @CCICandidateMinSizeGB / 1024. -- consider sufficiently large tables only
       AND
       t.is_ms_shipped = 0
-      AND
-      -- at least one partition is columnstore compressible
-      EXISTS (
-             SELECT 1
-             FROM candidate_partition AS cp
-             WHERE cp.object_id = t.object_id
-                   AND
-                   cp.rows >= 102400
-             )
       AND
       -- conservatively require a CCI candidate to have no updates, seeks, or lookups
       tos.leaf_update_count = 0
@@ -2786,14 +2798,19 @@ DECLARE @crb TABLE (
                    );
 
 -- stage XML in a table variable to enable parallelism when processing XQuery expressions
-INSERT INTO @crb (event_time, record)
+WITH crb AS
+(
 SELECT DATEADD(millisecond, -1 * (si.cpu_ticks/(si.cpu_ticks/si.ms_ticks) - rb.timestamp), CURRENT_TIMESTAMP) AS event_time,
        TRY_CAST(rb.record AS XML) AS record
 FROM sys.dm_os_ring_buffers AS rb
 CROSS JOIN sys.dm_os_sys_info AS si
 WHERE rb.ring_buffer_type = 'RING_BUFFER_CONNECTIVITY'
-      AND
-      TRY_CAST(rb.record AS XML) IS NOT NULL;
+)
+INSERT INTO @crb (event_time, record)
+SELECT event_time, record
+FROM crb
+WHERE event_time > DATEADD(minute, -@NotableNetworkEventsIntervalMinutes, CURRENT_TIMESTAMP) -- ignore older events
+;
 
 DROP TABLE IF EXISTS ##tips_connectivity_event;
 
@@ -2802,6 +2819,7 @@ WITH connectivity_event AS
 SELECT event_time,
        record
 FROM @crb
+WHERE record IS NOT NULL
 ),
 shredded_connectivity_event AS
 (
@@ -2872,9 +2890,7 @@ LEFT JOIN sys.messages AS m
 ON sce.sni_consumer_error = m.message_id
    AND
    m.language_id = 1033
-WHERE sce.event_time > DATEADD(minute, -@NotableNetworkEventsIntervalMinutes, CURRENT_TIMESTAMP) -- ignore older events
-      AND
-      sce.remote_host <> '<named pipe>' -- ignore SQL DB internal connections
+WHERE sce.remote_host <> '<named pipe>' -- ignore SQL DB internal connections
       AND
       (
       (
