@@ -2,8 +2,6 @@
 Returns a set of tips to improve database design, health, and performance in Azure SQL Database.
 For the latest version of the script, see https://aka.ms/sqldbtips
 For detailed description, see https://aka.ms/sqldbtipswiki
-
-v20210123.2
 */
 
 -- Set to 1 to output tips as a JSON value
@@ -262,9 +260,9 @@ VALUES
 (1, 1300, 'Geo-replication state may be unhealthy',                   70, 'https://aka.ms/sqldbtipswiki#tip_id-1300', 'VIEW DATABASE STATE'),
 (1, 1310, 'Last partitions are not empty',                            80, 'https://aka.ms/sqldbtipswiki#tip_id-1310', 'VIEW DATABASE STATE'),
 (1, 1320, 'Top queries should be investigated and tuned',             90, 'https://aka.ms/sqldbtipswiki#tip_id-1320', 'VIEW DATABASE STATE'),
-(1, 1330, 'Tempdb data allocated size is close to MAXSIZE',           70, 'https://aka.ms/sqldbtipswiki#tip_id-1330', 'VIEW DATABASE STATE'),
+(1, 1330, 'Tempdb data allocated size is close to MAXSIZE',           70, 'https://aka.ms/sqldbtipswiki#tip_id-1330', 'VIEW SERVER STATE'),
 (1, 1340, 'Tempdb data used size is close to MAXSIZE',                95, 'https://aka.ms/sqldbtipswiki#tip_id-1340', 'VIEW SERVER STATE'),
-(1, 1350, 'Tempdb log allocated size is close to MAXSIZE',            80, 'https://aka.ms/sqldbtipswiki#tip_id-1350', 'VIEW DATABASE STATE'),
+(1, 1350, 'Tempdb log allocated size is close to MAXSIZE',            80, 'https://aka.ms/sqldbtipswiki#tip_id-1350', 'VIEW SERVER STATE'),
 (1, 1360, 'Worker utilization is close to workload group limit',      80, 'https://aka.ms/sqldbtipswiki#tip_id-1360', 'VIEW SERVER STATE'),
 (1, 1370, 'Worker utilization is close to resource pool limit',       80, 'https://aka.ms/sqldbtipswiki#tip_id-1370', 'VIEW SERVER STATE'),
 (1, 1380, 'Notable network connectivity events found',                30, 'https://aka.ms/sqldbtipswiki#tip_id-1380', 'VIEW SERVER STATE'),
@@ -1241,105 +1239,6 @@ BEGIN CATCH
         THROW;
 END CATCH;
 
--- tempdb data and log size close to maxsize
-IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1330,1340,1350) AND execute_indicator = 1)
-BEGIN
-
-BEGIN TRY
-
--- get tempdb used (aka reserved) size
-DROP TABLE IF EXISTS #tempdb_space_used;
-
-CREATE TABLE #tempdb_space_used
-(
-database_name sysname NULL,
-database_size varchar(18) NULL,
-unallocated_space varchar(18) NULL,
-reserved varchar(18) NULL,
-data varchar(18) NULL,
-index_size varchar(18) NULL,
-unused varchar(18) NULL
-);
-
--- When not running as server admin and without membership in ##MS_ServerStateReader## we do not have
--- VIEW DATABASE STATE on tempdb, which is required to execute tempdb.sys.sp_spaceused to determine tempdb used space.
--- Skipping tip 1340 (tempdb used space) in that case.
-IF EXISTS (
-          SELECT 1
-          FROM tempdb.sys.fn_my_permissions(default, 'DATABASE')
-          WHERE entity_name = 'database'
-                AND
-                permission_name = 'VIEW DATABASE STATE'
-          )
-BEGIN
-    INSERT INTO #tempdb_space_used
-    EXEC tempdb.sys.sp_spaceused @oneresultset = 1;
-
-    IF @@ROWCOUNT <> 1
-        THROW 50020, 'tempdb.sys.sp_spaceused returned the number of rows other than 1.', 1;
-END;
-
-WITH tempdb_file_size AS
-(
-SELECT type_desc AS file_type,
-       SUM(CAST(size AS bigint) * 8 / 1024.) AS allocated_size_mb,
-       SUM(CAST(max_size AS bigint) * 8 / 1024.) AS max_size_mb,
-       SUM(IIF(type_desc = 'ROWS', 1, NULL)) AS count_files
-FROM tempdb.sys.database_files
-WHERE type_desc IN ('ROWS','LOG')
-GROUP BY type_desc
-),
-tempdb_tip AS
-(
-SELECT tfs.file_type,
-       tt.space_type,
-       tfs.allocated_size_mb,
-       TRY_CAST(LEFT(tsu.reserved, LEN(tsu.reserved) - 3) AS decimal) / 1024. AS used_size_mb,
-       tfs.max_size_mb,
-       tfs.count_files
-FROM tempdb_file_size AS tfs
-INNER JOIN (
-           VALUES ('ROWS', 'allocated'),
-                  ('ROWS', 'used'),
-                  ('LOG', 'allocated')
-           ) AS tt (file_type, space_type)
-ON tfs.file_type = tt.file_type
-LEFT JOIN #tempdb_space_used AS tsu
-ON tfs.file_type = 'ROWS'
-)
-INSERT INTO @DetectedTip (tip_id, details)
-SELECT CASE WHEN file_type = 'ROWS' AND space_type = 'allocated' THEN 1330
-            WHEN file_type = 'ROWS' AND space_type = 'used' THEN 1340
-            WHEN file_type = 'LOG' THEN 1350 
-       END 
-       AS tip_id,
-       CONCAT(
-             @NbspCRLF,
-             'tempdb ', CASE file_type WHEN 'ROWS' THEN 'data' WHEN 'LOG' THEN 'log' END , ' allocated size (MB): ', FORMAT(allocated_size_mb, '#,0.00'),
-             ', tempdb data used size (MB): ' + FORMAT(used_size_mb, '#,0.00'),
-             ', tempdb ', CASE file_type WHEN 'ROWS' THEN 'data' WHEN 'LOG' THEN 'log' END, ' MAXSIZE (MB): ', FORMAT(max_size_mb, '#,0.00'),
-             ', tempdb data files: ' + CAST(count_files AS varchar(11)),
-             @CRLF
-             )
-       AS details
-FROM tempdb_tip
-WHERE (file_type = 'ROWS' AND space_type = 'allocated' AND allocated_size_mb / NULLIF(max_size_mb, 0) > @TempdbDataAllocatedToMaxsizeThresholdRatio)
-      OR
-      (file_type = 'ROWS' AND space_type = 'used' AND used_size_mb / NULLIF(max_size_mb, 0) > @TempdbDataUsedToMaxsizeThresholdRatio)
-      OR
-      (file_type = 'LOG'  AND space_type = 'allocated' AND allocated_size_mb / NULLIF(max_size_mb, 0) > @TempdbLogAllocatedToMaxsizeThresholdRatio);
-
-END TRY
-BEGIN CATCH
-    IF ERROR_NUMBER() = 1222
-        INSERT INTO @LockTimeoutSkippedTip (tip_id)
-        VALUES (1330),(1340),(1350);
-    ELSE
-        THROW;
-END CATCH;
-
-END;
-
 -- High instance CPU
 IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1390) AND execute_indicator = 1)
 
@@ -1592,6 +1491,100 @@ END CATCH;
 
 IF @ViewServerStateIndicator = 1
 BEGIN -- begin tips requiring VIEW SERVER STATE
+
+-- tempdb data and log size close to maxsize
+IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1330,1340,1350) AND execute_indicator = 1)
+BEGIN
+
+BEGIN TRY
+
+-- get tempdb used (aka reserved) size
+DROP TABLE IF EXISTS #tempdb_space_used;
+
+CREATE TABLE #tempdb_space_used
+(
+database_name sysname NULL,
+database_size varchar(18) NULL,
+unallocated_space varchar(18) NULL,
+reserved varchar(18) NULL,
+data varchar(18) NULL,
+index_size varchar(18) NULL,
+unused varchar(18) NULL
+);
+
+INSERT INTO #tempdb_space_used
+EXEC tempdb.sys.sp_spaceused @oneresultset = 1;
+
+IF @@ROWCOUNT <> 1
+    THROW 50020, 'tempdb.sys.sp_spaceused returned the number of rows other than 1.', 1;
+
+WITH tempdb_file_size AS
+(
+SELECT type_desc AS file_type,
+       SUM(CAST(size AS bigint) * 8 / 1024.) AS allocated_size_mb,
+       SUM(CAST(max_size AS bigint) * 8 / 1024.) AS max_size_mb,
+       SUM(IIF(type_desc = 'ROWS', 1, NULL)) AS count_files
+FROM tempdb.sys.database_files
+WHERE type_desc IN ('ROWS','LOG')
+GROUP BY type_desc
+),
+tempdb_tip AS
+(
+SELECT tfs.file_type,
+       tt.space_type,
+       tfs.allocated_size_mb,
+       CASE tt.file_type WHEN 'ROWS'
+                         THEN TRY_CAST(LEFT(tsu.reserved, LEN(tsu.reserved) - 3) AS decimal) / 1024.
+                         WHEN 'LOG' 
+                         THEN lsu.used_log_space_in_bytes / 1024. / 1024
+       END
+       AS used_size_mb,
+       tfs.max_size_mb,
+       tfs.count_files
+FROM tempdb_file_size AS tfs
+INNER JOIN (
+           VALUES ('ROWS', 'allocated'),
+                  ('ROWS', 'used'),
+                  ('LOG', 'allocated')
+           ) AS tt (file_type, space_type)
+ON tfs.file_type = tt.file_type
+LEFT JOIN #tempdb_space_used AS tsu
+ON tfs.file_type = 'ROWS'
+LEFT JOIN tempdb.sys.dm_db_log_space_usage AS lsu
+ON tt.file_type = 'LOG'
+)
+INSERT INTO @DetectedTip (tip_id, details)
+SELECT CASE WHEN file_type = 'ROWS' AND space_type = 'allocated' THEN 1330
+            WHEN file_type = 'ROWS' AND space_type = 'used' THEN 1340
+            WHEN file_type = 'LOG' THEN 1350
+       END 
+       AS tip_id,
+       CONCAT(
+             @NbspCRLF,
+             'tempdb ', CASE file_type WHEN 'ROWS' THEN 'data' WHEN 'LOG' THEN 'log' END , ' used size (MB): ', FORMAT(used_size_mb, '#,0.00'),
+             ', tempdb ', CASE file_type WHEN 'ROWS' THEN 'data' WHEN 'LOG' THEN 'log' END , ' allocated size (MB): ', FORMAT(allocated_size_mb, '#,0.00'),
+             ', tempdb ', CASE file_type WHEN 'ROWS' THEN 'data' WHEN 'LOG' THEN 'log' END, ' MAXSIZE (MB): ', FORMAT(max_size_mb, '#,0.00'),
+             ', tempdb data files: ' + CAST(count_files AS varchar(11)),
+             @CRLF
+             )
+       AS details
+FROM tempdb_tip
+WHERE (file_type = 'ROWS' AND space_type = 'allocated' AND allocated_size_mb / NULLIF(max_size_mb, 0) > @TempdbDataAllocatedToMaxsizeThresholdRatio)
+      OR
+      (file_type = 'ROWS' AND space_type = 'used' AND used_size_mb / NULLIF(max_size_mb, 0) > @TempdbDataUsedToMaxsizeThresholdRatio)
+      OR
+      (file_type = 'LOG'  AND space_type = 'allocated' AND allocated_size_mb / NULLIF(max_size_mb, 0) > @TempdbLogAllocatedToMaxsizeThresholdRatio);
+
+END TRY
+BEGIN CATCH
+    IF ERROR_NUMBER() = 1222
+        INSERT INTO @LockTimeoutSkippedTip (tip_id)
+        VALUES (1330),(1340),(1350);
+    ELSE
+        THROW;
+END CATCH;
+
+END;
 
 -- Recent CPU throttling
 IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1150) AND execute_indicator = 1)
