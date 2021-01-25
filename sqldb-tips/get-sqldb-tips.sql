@@ -3,7 +3,7 @@ Returns a set of tips to improve database design, health, and performance in Azu
 For the latest version of the script, see https://aka.ms/sqldbtips
 For detailed description, see https://aka.ms/sqldbtipswiki
 
-v20210123.2
+v20210124.1
 */
 
 -- Set to 1 to output tips as a JSON value
@@ -1294,7 +1294,12 @@ tempdb_tip AS
 SELECT tfs.file_type,
        tt.space_type,
        tfs.allocated_size_mb,
-       TRY_CAST(LEFT(tsu.reserved, LEN(tsu.reserved) - 3) AS decimal) / 1024. AS used_size_mb,
+       CASE tt.file_type WHEN 'ROWS'
+                         THEN TRY_CAST(LEFT(tsu.reserved, LEN(tsu.reserved) - 3) AS decimal) / 1024.
+                         WHEN 'LOG' 
+                         THEN lsu.used_log_space_in_bytes / 1024. / 1024
+       END
+       AS used_size_mb,
        tfs.max_size_mb,
        tfs.count_files
 FROM tempdb_file_size AS tfs
@@ -1306,17 +1311,19 @@ INNER JOIN (
 ON tfs.file_type = tt.file_type
 LEFT JOIN #tempdb_space_used AS tsu
 ON tfs.file_type = 'ROWS'
+LEFT JOIN tempdb.sys.dm_db_log_space_usage AS lsu
+ON tt.file_type = 'LOG'
 )
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT CASE WHEN file_type = 'ROWS' AND space_type = 'allocated' THEN 1330
             WHEN file_type = 'ROWS' AND space_type = 'used' THEN 1340
-            WHEN file_type = 'LOG' THEN 1350 
+            WHEN file_type = 'LOG' AND space_type = 'allocated' THEN 1350
        END 
        AS tip_id,
        CONCAT(
              @NbspCRLF,
-             'tempdb ', CASE file_type WHEN 'ROWS' THEN 'data' WHEN 'LOG' THEN 'log' END , ' allocated size (MB): ', FORMAT(allocated_size_mb, '#,0.00'),
-             ', tempdb data used size (MB): ' + FORMAT(used_size_mb, '#,0.00'),
+             'tempdb ', CASE file_type WHEN 'ROWS' THEN 'data' WHEN 'LOG' THEN 'log' END , ' used size (MB): ', FORMAT(used_size_mb, '#,0.00'),
+             ', tempdb ', CASE file_type WHEN 'ROWS' THEN 'data' WHEN 'LOG' THEN 'log' END , ' allocated size (MB): ', FORMAT(allocated_size_mb, '#,0.00'),
              ', tempdb ', CASE file_type WHEN 'ROWS' THEN 'data' WHEN 'LOG' THEN 'log' END, ' MAXSIZE (MB): ', FORMAT(max_size_mb, '#,0.00'),
              ', tempdb data files: ' + CAST(count_files AS varchar(11)),
              @CRLF
