@@ -1,4 +1,7 @@
 /*
+ATTENTION: Only use this script if your database is using compatibility level 100.
+For all newer compatibility levels, use get-sqldb-tips.sql at https://aka.ms/sqldbtips
+
 Returns a set of tips to improve database design, health, and performance in Azure SQL Database.
 For the latest version of the script, see https://aka.ms/sqldbtips
 For detailed description, see https://aka.ms/sqldbtipswiki
@@ -222,6 +225,15 @@ IF EXISTS (
 IF DB_NAME() = 'master' AND @EngineEdition = 5
     THROW 50015, 'Execute this script in a user database, not in the ''master'' database.', 1;
 
+IF EXISTS (
+          SELECT 1 
+          FROM sys.databases 
+          WHERE database_id = DB_ID()
+                AND
+                compatibility_level > 100
+          )
+    THROW 50020, 'This script is intended only for databases using compatibility level 100. For all newer compatibility levels, use get-sqldb-tips.sql at https://aka.ms/sqldbtips.', 1;
+
 -- Define all tips
 INSERT INTO @TipDefinition (execute_indicator, tip_id, tip_name, confidence_percent, tip_url, required_permission)
 VALUES
@@ -334,7 +346,6 @@ query_wait_stats_summary AS
 (
 SELECT query_hash,
        STRING_AGG(wait_category_desc, ' | ')
-       WITHIN GROUP (ORDER BY total_query_wait_time_ms DESC)
        AS ranked_wait_categories
 FROM query_wait_stats_ratio
 GROUP BY query_hash
@@ -531,8 +542,7 @@ SELECT 1320 AS tip_id,
                                   ', parallelism rank: ', CAST(total_dop_rank AS varchar(11)),
                                   ', weighted wait categories: ', ISNULL(ranked_wait_categories, '-')
                                   ) AS nvarchar(max)), @CRLF
-                       )
-                       WITHIN GROUP (ORDER BY duration_rank),
+                       ),
              @CRLF
              )
        AS details
@@ -823,8 +833,7 @@ SELECT 1100 AS tip_id,
                                   ', object_id: ', CAST(object_id AS varchar(11)),
                                   ', index_id: ', CAST(index_id AS varchar(11))
                                   ) AS nvarchar(max)), @CRLF
-                       )
-                       WITHIN GROUP (ORDER BY schema_name, object_name, index_type, index_name),
+                       ),
              @CRLF
              )
        AS details
@@ -1020,8 +1029,7 @@ SELECT 1200 AS tip_id,
                                   ' MB, or ', FORMAT(single_use_db_plan_cache_size_mb / total_db_plan_cache_size_mb, 'P'),
                                   ' of total cached plans for this database.'
                                   ) AS nvarchar(max)), @CRLF
-                       )
-                       WITHIN GROUP (ORDER BY database_name DESC, database_id),
+                       ),
              @CRLF
              )
        AS details
@@ -1102,8 +1110,7 @@ SELECT 1280 AS tip_id,
                                   'time remaining to auto-abort (minutes): ' + FORMAT(time_to_auto_abort_minutes, '#,0') + CHAR(13) + CHAR(10),
                                   'index operation SQL statement: ', sql_text COLLATE DATABASE_DEFAULT, @CRLF
                                   ) AS nvarchar(max)), @CRLF
-                       )
-                       WITHIN GROUP (ORDER BY schema_name, object_name, index_name),
+                       ),
              @CRLF
              )
 FROM resumable_index_op 
@@ -1139,7 +1146,6 @@ SELECT STRING_AGG(
                             'geo-replication state: ' + replication_state_desc
                             ) AS nvarchar(max)), @CRLF
                  )
-                 WITHIN GROUP (ORDER BY partner_server, partner_database)
        AS details
 FROM sys.dm_geo_replication_link_status
 WHERE (replication_state_desc <> 'CATCH_UP' OR replication_state_desc IS NULL)
@@ -1222,8 +1228,7 @@ SELECT 1310 AS tip_id,
                                   'partition rows: ', FORMAT(partition_rows, '#,0'), ', ',
                                   'partition size (MB): ', FORMAT(partition_size_mb, '#,0.00')
                                   ) AS nvarchar(max)), @CRLF
-                       )
-                       WITHIN GROUP (ORDER BY schema_name, object_name, partition_number),
+                       ),
              @CRLF
              )
        AS details
@@ -1380,7 +1385,7 @@ SELECT 1400 AS tip_id,
                                                  )
                                         , '')
                                   ) AS nvarchar(max)), @CRLF
-                       ) WITHIN GROUP (ORDER BY schema_name, object_name, statistics_name),
+                       ),
              @CRLF
              )
        AS details
@@ -1461,7 +1466,7 @@ SELECT 1410 AS tip_id,
                           NULL
                           ),
                        @CRLF 
-                       ) WITHIN GROUP (ORDER BY schema_name, table_name),
+                       ),
              @CRLF
              )
        AS details
@@ -1730,7 +1735,7 @@ SELECT STRING_AGG(
                             index_name, 
                             ' (reads: ', FORMAT(user_seeks + user_scans + user_lookups, '#,0'), ' writes: ', FORMAT(user_updates, '#,0'), ')'
                             ) AS nvarchar(max)), @CRLF
-                 ) WITHIN GROUP (ORDER BY schema_name, object_name, index_name)
+                 )
        AS details
 FROM index_usage
 HAVING COUNT(1) > 0
@@ -1941,7 +1946,6 @@ SELECT STRING_AGG(
                             ', suggested compression type: ', new_compression_type
                             ) AS nvarchar(max)), @CRLF
                  )
-                 WITHIN GROUP (ORDER BY object_size_mb DESC, object_name, index_name, partition_range, partition_range_total_size_mb, new_compression_type)
        AS details
 FROM packed_partition_group
 HAVING COUNT(1) > 0
@@ -1990,7 +1994,6 @@ SELECT STRING_AGG(
                             ', avg user impact: ', gs.avg_user_impact, '%.'
                             ) AS nvarchar(max)), @CRLF
                  ) 
-                 WITHIN GROUP (ORDER BY avg_user_impact DESC, statement)
        AS details
 FROM sys.dm_db_missing_index_group_stats AS gs
 INNER JOIN sys.dm_db_missing_index_groups AS g
@@ -2605,7 +2608,6 @@ SELECT STRING_AGG(
                             'lookups: ', FORMAT(lookup_count, '#,0')
                             ) AS nvarchar(max)), @CRLF
                  )
-                 WITHIN GROUP (ORDER BY schema_name, table_name)
        AS details
 FROM cci_candidate_table
 )
@@ -3018,8 +3020,7 @@ BEGIN
                                  ', ', tip_name
                                  ),
                            @CRLF
-                           )
-                           WITHIN GROUP (ORDER BY tip_name),
+                           ),
                  @CRLF
                  )
            AS skipped_tips
