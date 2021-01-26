@@ -1480,7 +1480,11 @@ END CATCH;
 -- For tips that follow, VIEW DATABASE STATE is insufficient.
 -- Determine if we have VIEW SERVER STATE empirically, given the absense of metadata to determine that otherwise.
 BEGIN TRY
-    DECLARE @a int = (SELECT 1 FROM sys.dm_os_sys_info);
+    DECLARE @a int = (
+                     SELECT 1 FROM sys.dm_os_sys_info
+                     UNION
+                     SELECT 1 FROM tempdb.sys.dm_db_log_space_usage
+                     );
 END TRY
 BEGIN CATCH
     IF ERROR_NUMBER() <> 0
