@@ -1656,6 +1656,8 @@ WHERE @EngineEdition = 5
       OR
       name LIKE 'UserPool%'
       )
+      AND
+      delta_out_of_memory_count >= 0
 )
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1160 AS tip_id,
@@ -1691,6 +1693,10 @@ WHERE @EngineEdition = 5
       OR
       name LIKE 'UserPool%'
       )
+      AND
+      delta_memgrant_waiter_count >= 0
+      AND
+      delta_memgrant_timeout_count >= 0
 )
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1165 AS tip_id,
@@ -2456,9 +2462,11 @@ IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1270) AND execute_indic
 BEGIN TRY
 
 WITH 
-db_allocated_size AS
+db_size AS
 (
-SELECT SUM(CAST(size AS bigint) * 8.) AS db_allocated_size_kb
+SELECT SUM(CAST(FILEPROPERTY(name, 'SpaceUsed') AS bigint) * 8 / 1024. / 1024) AS space_used_gb,
+       SUM(CAST(size AS bigint) * 8 / 1024. / 1024) AS space_allocated_gb,
+       NULLIF(CAST(DATABASEPROPERTYEX(DB_NAME(), 'MaxSizeInBytes') AS bigint), -1) / 1024. / 1024 / 1024 AS max_size_gb
 FROM sys.database_files
 WHERE type_desc = 'ROWS'
 ),
@@ -2466,6 +2474,9 @@ pvs_db_stats AS
 (
 SELECT pvss.persistent_version_store_size_kb / 1024. / 1024 AS persistent_version_store_size_gb,
        pvss.online_index_version_store_size_kb / 1024. / 1024 AS online_index_version_store_size_gb,
+       ds.space_used_gb,
+       ds.space_allocated_gb,
+       ds.max_size_gb,
        pvss.current_aborted_transaction_count,
        pvss.aborted_version_cleaner_start_time,
        pvss.aborted_version_cleaner_end_time,
@@ -2473,7 +2484,7 @@ SELECT pvss.persistent_version_store_size_kb / 1024. / 1024 AS persistent_versio
        asdt.session_id AS active_transaction_session_id,
        asdt.elapsed_time_seconds AS active_transaction_elapsed_time_seconds
 FROM sys.dm_tran_persistent_version_store_stats AS pvss
-CROSS JOIN db_allocated_size AS das
+CROSS JOIN db_size AS ds
 LEFT JOIN sys.dm_tran_database_transactions AS dt
 ON pvss.oldest_active_transaction_id = dt.transaction_id
    AND
@@ -2485,12 +2496,13 @@ ON pvss.min_transaction_timestamp = asdt.transaction_sequence_num
 WHERE pvss.database_id = DB_ID()
       AND
       (
-      persistent_version_store_size_kb > @PVSMinimumSizeThresholdGB * 1024 * 1024 -- PVS is larger than n GB
+      pvss.persistent_version_store_size_kb > @PVSMinimumSizeThresholdGB * 1024 * 1024 -- PVS is larger than n GB
       OR
       (
-      persistent_version_store_size_kb > @PVSToMaxSizeMinThresholdRatio * das.db_allocated_size_kb -- PVS is larger than n% of database allocated size
+      -- compare PVS size to database MAXSIZE, or to allocated size when MAXSIZE is not defined (Hyperscale, Managed Instance)
+      pvss.persistent_version_store_size_kb >= @PVSToMaxSizeMinThresholdRatio * COALESCE(ds.max_size_gb, ds.space_allocated_gb) * 1024 * 1024 -- PVS is larger than n% of database max/allocated size
       AND
-      persistent_version_store_size_kb > 1048576 -- for small databases, don't consider PVS smaller than 1 GB as large
+      pvss.persistent_version_store_size_kb > 1048576 -- don't consider PVS smaller than 1 GB as large
       )
       )
 )
@@ -2500,6 +2512,9 @@ SELECT 1270 AS tip_id,
              @NbspCRLF,
              'PVS size (GB): ', FORMAT(persistent_version_store_size_gb, 'N'), @CRLF,
              'online index version store size (GB): ', FORMAT(online_index_version_store_size_gb, 'N'), @CRLF,
+             'used data size (GB): ', FORMAT(space_used_gb, 'N'), @CRLF,
+             'allocated data size (GB): ', FORMAT(space_allocated_gb, 'N'), @CRLF,
+             'maximum database size (GB): ' + FORMAT(max_size_gb, 'N') + @CRLF, -- omit for Hyperscale and MI as not applicable
              'current aborted transaction count: ', FORMAT(current_aborted_transaction_count, '#,0'), @CRLF,
              'aborted transaction version cleaner start time (UTC): ', ISNULL(CONVERT(varchar(20), aborted_version_cleaner_start_time, 120), '-'), @CRLF,
              'aborted transaction version cleaner end time (UTC): ', ISNULL(CONVERT(varchar(20), aborted_version_cleaner_end_time, 120), '-'), @CRLF,
