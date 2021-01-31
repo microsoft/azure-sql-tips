@@ -523,6 +523,7 @@ SELECT 1320 AS tip_id,
              'server: ', @@SERVERNAME,
              ', database: ', DB_NAME(),
              ', SLO: ', rg.slo_name,
+             ', updateability: ', CAST(DATABASEPROPERTYEX(DB_NAME(), 'Updateability') AS nvarchar(10)),
              ', logical database GUID: ', rg.logical_database_guid,
              ', physical database GUID: ', rg.physical_database_guid,
              @CRLF, @CRLF,
@@ -1094,6 +1095,8 @@ CROSS JOIN sys.database_scoped_configurations AS dsc
 WHERE iro.state_desc = 'PAUSED'
       AND
       dsc.name = 'PAUSED_RESUMABLE_INDEX_ABORT_DURATION_MINUTES'
+      AND
+      DATABASEPROPERTYEX(DB_NAME(), 'Updateability') = 'READ_WRITE' -- only produce this on primary
 )
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1280 AS tip_id,
@@ -1869,6 +1872,8 @@ WHERE i.type_desc IN ('CLUSTERED','NONCLUSTERED','HEAP')
                        AND
                        t.is_external = 1
                  )
+      AND
+      DATABASEPROPERTYEX(DB_NAME(), 'Updateability') = 'READ_WRITE' -- only produce this on primary
 ),
 partition_compression AS
 (
@@ -2576,6 +2581,8 @@ WHERE data_compression_desc IN ('NONE','ROW','PAGE')
       object_has_columnstore_indexes = 0
       AND
       object_has_columnstore_compressible_partitions = 1
+      AND
+      DATABASEPROPERTYEX(DB_NAME(), 'Updateability') = 'READ_WRITE' -- only produce this on primary
 ),
 table_operational_stats AS -- summarize operational stats for heap, CI, and NCI
 (
