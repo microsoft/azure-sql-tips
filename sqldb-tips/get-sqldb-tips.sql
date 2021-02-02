@@ -512,6 +512,7 @@ SELECT 1320 AS tip_id,
              'server: ', @@SERVERNAME,
              ', database: ', DB_NAME(),
              ', SLO: ', rg.slo_name,
+             ', updateability: ', CAST(DATABASEPROPERTYEX(DB_NAME(), 'Updateability') AS nvarchar(10)),
              ', logical database GUID: ', rg.logical_database_guid,
              ', physical database GUID: ', rg.physical_database_guid,
              @CRLF, @CRLF,
@@ -1086,6 +1087,8 @@ CROSS JOIN sys.database_scoped_configurations AS dsc
 WHERE iro.state_desc = 'PAUSED'
       AND
       dsc.name = 'PAUSED_RESUMABLE_INDEX_ABORT_DURATION_MINUTES'
+      AND
+      DATABASEPROPERTYEX(DB_NAME(), 'Updateability') = 'READ_WRITE' -- only produce this on primary
 )
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1280 AS tip_id,
@@ -1646,7 +1649,7 @@ IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1160) AND execute_indic
 WITH oom AS
 (
 SELECT SUM(duration_ms) / 60000 AS recent_history_duration_minutes,
-       SUM(delta_out_of_memory_count) AS count_oom
+       SUM(IIF(delta_out_of_memory_count >= 0, delta_out_of_memory_count, 0)) AS count_oom
 FROM sys.dm_resource_governor_resource_pools_history_ex
 WHERE @EngineEdition = 5
       AND
@@ -1680,8 +1683,8 @@ IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1165) AND execute_indic
 WITH memgrant AS
 (
 SELECT SUM(duration_ms) / 60000 AS recent_history_duration_minutes,
-       SUM(delta_memgrant_waiter_count) AS count_memgrant_waiter,
-       SUM(delta_memgrant_timeout_count) AS count_memgrant_timeout
+       SUM(IIF(delta_memgrant_waiter_count >= 0, delta_memgrant_waiter_count, 0)) AS count_memgrant_waiter,
+       SUM(IIF(delta_memgrant_timeout_count >= 0, delta_memgrant_timeout_count, 0)) AS count_memgrant_timeout
 FROM sys.dm_resource_governor_resource_pools_history_ex
 WHERE @EngineEdition = 5
       AND
@@ -1858,6 +1861,8 @@ WHERE i.type_desc IN ('CLUSTERED','NONCLUSTERED','HEAP')
                        AND
                        t.is_external = 1
                  )
+      AND
+      DATABASEPROPERTYEX(DB_NAME(), 'Updateability') = 'READ_WRITE' -- only produce this on primary
 ),
 partition_compression AS
 (
@@ -2456,9 +2461,11 @@ IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1270) AND execute_indic
 BEGIN TRY
 
 WITH 
-db_allocated_size AS
+db_size AS
 (
-SELECT SUM(CAST(size AS bigint) * 8.) AS db_allocated_size_kb
+SELECT SUM(CAST(FILEPROPERTY(name, 'SpaceUsed') AS bigint) * 8 / 1024. / 1024) AS space_used_gb,
+       SUM(CAST(size AS bigint) * 8 / 1024. / 1024) AS space_allocated_gb,
+       NULLIF(CAST(DATABASEPROPERTYEX(DB_NAME(), 'MaxSizeInBytes') AS bigint), -1) / 1024. / 1024 / 1024 AS max_size_gb
 FROM sys.database_files
 WHERE type_desc = 'ROWS'
 ),
@@ -2466,6 +2473,9 @@ pvs_db_stats AS
 (
 SELECT pvss.persistent_version_store_size_kb / 1024. / 1024 AS persistent_version_store_size_gb,
        pvss.online_index_version_store_size_kb / 1024. / 1024 AS online_index_version_store_size_gb,
+       ds.space_used_gb,
+       ds.space_allocated_gb,
+       ds.max_size_gb,
        pvss.current_aborted_transaction_count,
        pvss.aborted_version_cleaner_start_time,
        pvss.aborted_version_cleaner_end_time,
@@ -2473,7 +2483,7 @@ SELECT pvss.persistent_version_store_size_kb / 1024. / 1024 AS persistent_versio
        asdt.session_id AS active_transaction_session_id,
        asdt.elapsed_time_seconds AS active_transaction_elapsed_time_seconds
 FROM sys.dm_tran_persistent_version_store_stats AS pvss
-CROSS JOIN db_allocated_size AS das
+CROSS JOIN db_size AS ds
 LEFT JOIN sys.dm_tran_database_transactions AS dt
 ON pvss.oldest_active_transaction_id = dt.transaction_id
    AND
@@ -2485,12 +2495,13 @@ ON pvss.min_transaction_timestamp = asdt.transaction_sequence_num
 WHERE pvss.database_id = DB_ID()
       AND
       (
-      persistent_version_store_size_kb > @PVSMinimumSizeThresholdGB * 1024 * 1024 -- PVS is larger than n GB
+      pvss.persistent_version_store_size_kb > @PVSMinimumSizeThresholdGB * 1024 * 1024 -- PVS is larger than n GB
       OR
       (
-      persistent_version_store_size_kb > @PVSToMaxSizeMinThresholdRatio * das.db_allocated_size_kb -- PVS is larger than n% of database allocated size
+      -- compare PVS size to database MAXSIZE, or to allocated size when MAXSIZE is not defined (Hyperscale, Managed Instance)
+      pvss.persistent_version_store_size_kb >= @PVSToMaxSizeMinThresholdRatio * COALESCE(ds.max_size_gb, ds.space_allocated_gb) * 1024 * 1024 -- PVS is larger than n% of database max/allocated size
       AND
-      persistent_version_store_size_kb > 1048576 -- for small databases, don't consider PVS smaller than 1 GB as large
+      pvss.persistent_version_store_size_kb > 1048576 -- don't consider PVS smaller than 1 GB as large
       )
       )
 )
@@ -2500,6 +2511,9 @@ SELECT 1270 AS tip_id,
              @NbspCRLF,
              'PVS size (GB): ', FORMAT(persistent_version_store_size_gb, 'N'), @CRLF,
              'online index version store size (GB): ', FORMAT(online_index_version_store_size_gb, 'N'), @CRLF,
+             'used data size (GB): ', FORMAT(space_used_gb, 'N'), @CRLF,
+             'allocated data size (GB): ', FORMAT(space_allocated_gb, 'N'), @CRLF,
+             'maximum database size (GB): ' + FORMAT(max_size_gb, 'N') + @CRLF, -- omit for Hyperscale and MI as not applicable
              'current aborted transaction count: ', FORMAT(current_aborted_transaction_count, '#,0'), @CRLF,
              'aborted transaction version cleaner start time (UTC): ', ISNULL(CONVERT(varchar(20), aborted_version_cleaner_start_time, 120), '-'), @CRLF,
              'aborted transaction version cleaner end time (UTC): ', ISNULL(CONVERT(varchar(20), aborted_version_cleaner_end_time, 120), '-'), @CRLF,
@@ -2558,6 +2572,8 @@ WHERE data_compression_desc IN ('NONE','ROW','PAGE')
       object_has_columnstore_indexes = 0
       AND
       object_has_columnstore_compressible_partitions = 1
+      AND
+      DATABASEPROPERTYEX(DB_NAME(), 'Updateability') = 'READ_WRITE' -- only produce this on primary
 ),
 table_operational_stats AS -- summarize operational stats for heap, CI, and NCI
 (
