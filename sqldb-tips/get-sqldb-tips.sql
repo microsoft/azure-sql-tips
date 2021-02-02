@@ -1649,7 +1649,7 @@ IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1160) AND execute_indic
 WITH oom AS
 (
 SELECT SUM(duration_ms) / 60000 AS recent_history_duration_minutes,
-       SUM(delta_out_of_memory_count) AS count_oom
+       SUM(IIF(delta_out_of_memory_count >= 0, delta_out_of_memory_count, 0)) AS count_oom
 FROM sys.dm_resource_governor_resource_pools_history_ex
 WHERE @EngineEdition = 5
       AND
@@ -1659,8 +1659,6 @@ WHERE @EngineEdition = 5
       OR
       name LIKE 'UserPool%'
       )
-      AND
-      delta_out_of_memory_count >= 0
 )
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1160 AS tip_id,
@@ -1685,8 +1683,8 @@ IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1165) AND execute_indic
 WITH memgrant AS
 (
 SELECT SUM(duration_ms) / 60000 AS recent_history_duration_minutes,
-       SUM(delta_memgrant_waiter_count) AS count_memgrant_waiter,
-       SUM(delta_memgrant_timeout_count) AS count_memgrant_timeout
+       SUM(IIF(delta_memgrant_waiter_count >= 0, delta_memgrant_waiter_count, 0)) AS count_memgrant_waiter,
+       SUM(IIF(delta_memgrant_timeout_count >= 0, delta_memgrant_timeout_count, 0)) AS count_memgrant_timeout
 FROM sys.dm_resource_governor_resource_pools_history_ex
 WHERE @EngineEdition = 5
       AND
@@ -1696,10 +1694,6 @@ WHERE @EngineEdition = 5
       OR
       name LIKE 'UserPool%'
       )
-      AND
-      delta_memgrant_waiter_count >= 0
-      AND
-      delta_memgrant_timeout_count >= 0
 )
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1165 AS tip_id,
