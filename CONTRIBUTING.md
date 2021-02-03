@@ -1,6 +1,6 @@
 # Contributions
 
-We welcome and encourage contributions to this project. You can open [issues](../../azure-sql-tools/issues) to report bugs and suggest improvements or new tips, or send [pull requests](../../azure-sql-tools/pulls) to contribute code.
+We welcome and encourage contributions to this project. You can open [issues](../../issues) to report bugs and suggest improvements or new tips, or send [pull requests](../../pulls) to contribute code.
 
 We request that you keep the following guidelines in mind:
 
