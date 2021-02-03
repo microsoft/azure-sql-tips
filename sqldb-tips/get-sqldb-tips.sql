@@ -181,9 +181,10 @@ DECLARE @DetectedTip table (
                            tip_id smallint NOT NULL PRIMARY KEY,
                            details nvarchar(max) NULL
                            );
-DECLARE @LockTimeoutSkippedTip table (
-                                     tip_id smallint NOT NULL PRIMARY KEY
-                                     );
+DECLARE @SkippedTip table (
+                          tip_id smallint NOT NULL PRIMARY KEY,
+                          reason nvarchar(30) NOT NULL DEFAULT ('lock timeout')
+                          );
 
 DECLARE @CRLF char(2) = CONCAT(CHAR(13), CHAR(10)),
         @NbspCRLF nchar(3) = CONCAT(NCHAR(160), NCHAR(13), NCHAR(10));
@@ -260,9 +261,9 @@ VALUES
 (1, 1300, 'Geo-replication state may be unhealthy',                   70, 'https://aka.ms/sqldbtipswiki#tip_id-1300', 'VIEW DATABASE STATE'),
 (1, 1310, 'Last partitions are not empty',                            80, 'https://aka.ms/sqldbtipswiki#tip_id-1310', 'VIEW DATABASE STATE'),
 (1, 1320, 'Top queries should be investigated and tuned',             90, 'https://aka.ms/sqldbtipswiki#tip_id-1320', 'VIEW DATABASE STATE'),
-(1, 1330, 'Tempdb data allocated size is close to MAXSIZE',           70, 'https://aka.ms/sqldbtipswiki#tip_id-1330', 'VIEW SERVER STATE'),
-(1, 1340, 'Tempdb data used size is close to MAXSIZE',                95, 'https://aka.ms/sqldbtipswiki#tip_id-1340', 'VIEW SERVER STATE'),
-(1, 1350, 'Tempdb log allocated size is close to MAXSIZE',            80, 'https://aka.ms/sqldbtipswiki#tip_id-1350', 'VIEW SERVER STATE'),
+(1, 1330, 'Tempdb data allocated size is close to MAXSIZE',           70, 'https://aka.ms/sqldbtipswiki#tip_id-1330', 'tempdb.VIEW DATABASE STATE'),
+(1, 1340, 'Tempdb data used size is close to MAXSIZE',                95, 'https://aka.ms/sqldbtipswiki#tip_id-1340', 'tempdb.VIEW DATABASE STATE'),
+(1, 1350, 'Tempdb log allocated size is close to MAXSIZE',            80, 'https://aka.ms/sqldbtipswiki#tip_id-1350', 'tempdb.VIEW DATABASE STATE'),
 (1, 1360, 'Worker utilization is close to workload group limit',      80, 'https://aka.ms/sqldbtipswiki#tip_id-1360', 'VIEW SERVER STATE'),
 (1, 1370, 'Worker utilization is close to resource pool limit',       80, 'https://aka.ms/sqldbtipswiki#tip_id-1370', 'VIEW SERVER STATE'),
 (1, 1380, 'Notable network connectivity events found',                30, 'https://aka.ms/sqldbtipswiki#tip_id-1380', 'VIEW SERVER STATE'),
@@ -511,6 +512,7 @@ SELECT 1320 AS tip_id,
              'server: ', @@SERVERNAME,
              ', database: ', DB_NAME(),
              ', SLO: ', rg.slo_name,
+             ', updateability: ', CAST(DATABASEPROPERTYEX(DB_NAME(), 'Updateability') AS nvarchar(10)),
              ', logical database GUID: ', rg.logical_database_guid,
              ', physical database GUID: ', rg.physical_database_guid,
              @CRLF, @CRLF,
@@ -548,7 +550,7 @@ OPTION (RECOMPILE);
 END TRY
 BEGIN CATCH
     IF ERROR_NUMBER() = 1222
-        INSERT INTO @LockTimeoutSkippedTip (tip_id)
+        INSERT INTO @SkippedTip (tip_id)
         VALUES (1320);
     ELSE
         THROW;
@@ -615,7 +617,7 @@ HAVING COUNT(1) > 1 -- Consider the last two compat levels (including the one po
 END TRY
 BEGIN CATCH
     IF ERROR_NUMBER() = 1222
-        INSERT INTO @LockTimeoutSkippedTip (tip_id)
+        INSERT INTO @SkippedTip (tip_id)
         VALUES (1030);
     ELSE
         THROW;
@@ -651,7 +653,7 @@ FROM autostats;
 END TRY
 BEGIN CATCH
     IF ERROR_NUMBER() = 1222
-        INSERT INTO @LockTimeoutSkippedTip (tip_id)
+        INSERT INTO @SkippedTip (tip_id)
         VALUES (1040),(1050);
     ELSE
         THROW;
@@ -672,7 +674,7 @@ WHERE name = DB_NAME()
 END TRY
 BEGIN CATCH
     IF ERROR_NUMBER() = 1222
-        INSERT INTO @LockTimeoutSkippedTip (tip_id)
+        INSERT INTO @SkippedTip (tip_id)
         VALUES (1060);
     ELSE
         THROW;
@@ -719,7 +721,7 @@ WHERE DATABASEPROPERTYEX(DB_NAME(), 'Updateability') = 'READ_WRITE' -- only prod
 END TRY
 BEGIN CATCH
     IF ERROR_NUMBER() = 1222
-        INSERT INTO @LockTimeoutSkippedTip (tip_id)
+        INSERT INTO @SkippedTip (tip_id)
         VALUES (1070),(1071),(1072);
     ELSE
         THROW;
@@ -740,13 +742,15 @@ WHERE name = DB_NAME()
 END TRY
 BEGIN CATCH
     IF ERROR_NUMBER() = 1222
-        INSERT INTO @LockTimeoutSkippedTip (tip_id)
+        INSERT INTO @SkippedTip (tip_id)
         VALUES (1080);
     ELSE
         THROW;
 END CATCH;
 
 -- Btree indexes with uniqueidentifier leading column
+-- This and all other tips querying sys.dm_db_partition_stats may be silently skipped
+-- when running with limited permissions and not holding both VIEW DATABASE STATE and VIEW DEFINITION.
 IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1100) AND execute_indicator = 1)
 
 BEGIN TRY
@@ -834,7 +838,7 @@ HAVING COUNT(1) > 0;
 END TRY
 BEGIN CATCH
     IF ERROR_NUMBER() = 1222
-        INSERT INTO @LockTimeoutSkippedTip (tip_id)
+        INSERT INTO @SkippedTip (tip_id)
         VALUES (1100);
     ELSE
         THROW;
@@ -1083,6 +1087,8 @@ CROSS JOIN sys.database_scoped_configurations AS dsc
 WHERE iro.state_desc = 'PAUSED'
       AND
       dsc.name = 'PAUSED_RESUMABLE_INDEX_ABORT_DURATION_MINUTES'
+      AND
+      DATABASEPROPERTYEX(DB_NAME(), 'Updateability') = 'READ_WRITE' -- only produce this on primary
 )
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1280 AS tip_id,
@@ -1112,7 +1118,7 @@ HAVING COUNT(1) > 0;
 END TRY
 BEGIN CATCH
     IF ERROR_NUMBER() = 1222
-        INSERT INTO @LockTimeoutSkippedTip (tip_id)
+        INSERT INTO @SkippedTip (tip_id)
         VALUES (1280);
     ELSE
         THROW;
@@ -1166,7 +1172,7 @@ FROM geo_replication_link_details;
 END TRY
 BEGIN CATCH
     IF ERROR_NUMBER() = 1222
-        INSERT INTO @LockTimeoutSkippedTip (tip_id)
+        INSERT INTO @SkippedTip (tip_id)
         VALUES (1300);
     ELSE
         THROW;
@@ -1233,7 +1239,7 @@ HAVING COUNT(1) > 0;
 END TRY
 BEGIN CATCH
     IF ERROR_NUMBER() = 1222
-        INSERT INTO @LockTimeoutSkippedTip (tip_id)
+        INSERT INTO @SkippedTip (tip_id)
         VALUES (1310);
     ELSE
         THROW;
@@ -1296,6 +1302,9 @@ WHERE count_high_instance_cpu_intervals > 0
 ;
 
 -- Stale stats
+-- This may be silently skipped if running with limited permissions.
+-- VIEW SERVER STATE is insufficient to query sys.dm_db_stats_properties(),
+-- sysadmin or db_owner or SELECT on columns is required.
 IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1400) AND execute_indicator = 1)
 
 BEGIN TRY
@@ -1390,7 +1399,7 @@ HAVING COUNT(1) > 0;
 END TRY
 BEGIN CATCH
     IF ERROR_NUMBER() = 1222
-        INSERT INTO @LockTimeoutSkippedTip (tip_id)
+        INSERT INTO @SkippedTip (tip_id)
         VALUES (1400);
     ELSE
         THROW;
@@ -1471,30 +1480,24 @@ HAVING SUM(no_index_indicator) > @NoIndexMinTableCountRatio * COUNT(1);
 END TRY
 BEGIN CATCH
     IF ERROR_NUMBER() = 1222
-        INSERT INTO @LockTimeoutSkippedTip (tip_id)
+        INSERT INTO @SkippedTip (tip_id)
         VALUES (1410);
     ELSE
         THROW;
 END CATCH;
 
--- For tips that follow, VIEW DATABASE STATE is insufficient.
--- Determine if we have VIEW SERVER STATE empirically, given the absense of metadata to determine that otherwise.
-BEGIN TRY
-    DECLARE @a int = (
-                     SELECT 1 FROM sys.dm_os_sys_info
-                     UNION
-                     SELECT 1 FROM tempdb.sys.dm_db_log_space_usage
-                     );
-END TRY
-BEGIN CATCH
-    IF ERROR_NUMBER() <> 0
-        SELECT @ViewServerStateIndicator = 0;
-END CATCH;
-
--- Proceed with the rest of the tips only if required permission is held
-
-IF @ViewServerStateIndicator = 1
-BEGIN -- begin tips requiring VIEW SERVER STATE
+-- When not running as server admin and without membership in ##MS_ServerStateReader## we do not have
+-- VIEW DATABASE STATE on tempdb, which is required to execute tempdb.sys.sp_spaceused
+-- and query tempdb.sys.dm_db_log_space_usage to determine tempdb used data and log space.
+-- Evaluate these tempdb tips only if the required permission is held.
+IF EXISTS (
+          SELECT 1
+          FROM tempdb.sys.fn_my_permissions(default, 'DATABASE')
+          WHERE entity_name = 'database'
+                AND
+                permission_name = 'VIEW DATABASE STATE'
+          )
+BEGIN
 
 -- tempdb data and log size close to maxsize
 IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1330,1340,1350) AND execute_indicator = 1)
@@ -1582,13 +1585,35 @@ WHERE (file_type = 'ROWS' AND space_type = 'allocated' AND allocated_size_mb / N
 END TRY
 BEGIN CATCH
     IF ERROR_NUMBER() = 1222
-        INSERT INTO @LockTimeoutSkippedTip (tip_id)
+        INSERT INTO @SkippedTip (tip_id)
         VALUES (1330),(1340),(1350);
     ELSE
         THROW;
 END CATCH;
 
 END;
+
+END
+ELSE
+    INSERT INTO @SkippedTip (tip_id, reason)
+    VALUES (1330,'insufficient permissions'),
+           (1340,'insufficient permissions'),
+           (1350,'insufficient permissions');
+
+-- For tips that follow, VIEW DATABASE STATE is insufficient.
+-- Determine if we have VIEW SERVER STATE empirically, given the absense of metadata to determine that otherwise.
+BEGIN TRY
+    DECLARE @a int = (SELECT 1 FROM sys.dm_os_sys_info);
+END TRY
+BEGIN CATCH
+    IF ERROR_NUMBER() <> 0
+        SELECT @ViewServerStateIndicator = 0;
+END CATCH;
+
+-- Proceed with the rest of the tips only if required permission is held
+
+IF @ViewServerStateIndicator = 1
+BEGIN -- begin tips requiring VIEW SERVER STATE
 
 -- Recent CPU throttling
 IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1150) AND execute_indicator = 1)
@@ -1624,7 +1649,7 @@ IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1160) AND execute_indic
 WITH oom AS
 (
 SELECT SUM(duration_ms) / 60000 AS recent_history_duration_minutes,
-       SUM(delta_out_of_memory_count) AS count_oom
+       SUM(IIF(delta_out_of_memory_count >= 0, delta_out_of_memory_count, 0)) AS count_oom
 FROM sys.dm_resource_governor_resource_pools_history_ex
 WHERE @EngineEdition = 5
       AND
@@ -1658,8 +1683,8 @@ IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1165) AND execute_indic
 WITH memgrant AS
 (
 SELECT SUM(duration_ms) / 60000 AS recent_history_duration_minutes,
-       SUM(delta_memgrant_waiter_count) AS count_memgrant_waiter,
-       SUM(delta_memgrant_timeout_count) AS count_memgrant_timeout
+       SUM(IIF(delta_memgrant_waiter_count >= 0, delta_memgrant_waiter_count, 0)) AS count_memgrant_waiter,
+       SUM(IIF(delta_memgrant_timeout_count >= 0, delta_memgrant_timeout_count, 0)) AS count_memgrant_timeout
 FROM sys.dm_resource_governor_resource_pools_history_ex
 WHERE @EngineEdition = 5
       AND
@@ -1756,7 +1781,7 @@ WHERE iua.details IS NOT NULL;
 END TRY
 BEGIN CATCH
     IF ERROR_NUMBER() = 1222
-        INSERT INTO @LockTimeoutSkippedTip (tip_id)
+        INSERT INTO @SkippedTip (tip_id)
         VALUES (1170);
     ELSE
         THROW;
@@ -1836,6 +1861,8 @@ WHERE i.type_desc IN ('CLUSTERED','NONCLUSTERED','HEAP')
                        AND
                        t.is_external = 1
                  )
+      AND
+      DATABASEPROPERTYEX(DB_NAME(), 'Updateability') = 'READ_WRITE' -- only produce this on primary
 ),
 partition_compression AS
 (
@@ -1968,7 +1995,7 @@ WHERE ppga.details IS NOT NULL
 END TRY
 BEGIN CATCH
     IF ERROR_NUMBER() = 1222
-        INSERT INTO @LockTimeoutSkippedTip (tip_id)
+        INSERT INTO @SkippedTip (tip_id)
         VALUES (1180);
     ELSE
         THROW;
@@ -2021,7 +2048,7 @@ WHERE mia.details IS NOT NULL;
 END TRY
 BEGIN CATCH
     IF ERROR_NUMBER() = 1222
-        INSERT INTO @LockTimeoutSkippedTip (tip_id)
+        INSERT INTO @SkippedTip (tip_id)
         VALUES (1210);
     ELSE
         THROW;
@@ -2434,9 +2461,11 @@ IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1270) AND execute_indic
 BEGIN TRY
 
 WITH 
-db_allocated_size AS
+db_size AS
 (
-SELECT SUM(CAST(size AS bigint) * 8.) AS db_allocated_size_kb
+SELECT SUM(CAST(FILEPROPERTY(name, 'SpaceUsed') AS bigint) * 8 / 1024. / 1024) AS space_used_gb,
+       SUM(CAST(size AS bigint) * 8 / 1024. / 1024) AS space_allocated_gb,
+       NULLIF(CAST(DATABASEPROPERTYEX(DB_NAME(), 'MaxSizeInBytes') AS bigint), -1) / 1024. / 1024 / 1024 AS max_size_gb
 FROM sys.database_files
 WHERE type_desc = 'ROWS'
 ),
@@ -2444,6 +2473,9 @@ pvs_db_stats AS
 (
 SELECT pvss.persistent_version_store_size_kb / 1024. / 1024 AS persistent_version_store_size_gb,
        pvss.online_index_version_store_size_kb / 1024. / 1024 AS online_index_version_store_size_gb,
+       ds.space_used_gb,
+       ds.space_allocated_gb,
+       ds.max_size_gb,
        pvss.current_aborted_transaction_count,
        pvss.aborted_version_cleaner_start_time,
        pvss.aborted_version_cleaner_end_time,
@@ -2451,7 +2483,7 @@ SELECT pvss.persistent_version_store_size_kb / 1024. / 1024 AS persistent_versio
        asdt.session_id AS active_transaction_session_id,
        asdt.elapsed_time_seconds AS active_transaction_elapsed_time_seconds
 FROM sys.dm_tran_persistent_version_store_stats AS pvss
-CROSS JOIN db_allocated_size AS das
+CROSS JOIN db_size AS ds
 LEFT JOIN sys.dm_tran_database_transactions AS dt
 ON pvss.oldest_active_transaction_id = dt.transaction_id
    AND
@@ -2463,12 +2495,13 @@ ON pvss.min_transaction_timestamp = asdt.transaction_sequence_num
 WHERE pvss.database_id = DB_ID()
       AND
       (
-      persistent_version_store_size_kb > @PVSMinimumSizeThresholdGB * 1024 * 1024 -- PVS is larger than n GB
+      pvss.persistent_version_store_size_kb > @PVSMinimumSizeThresholdGB * 1024 * 1024 -- PVS is larger than n GB
       OR
       (
-      persistent_version_store_size_kb > @PVSToMaxSizeMinThresholdRatio * das.db_allocated_size_kb -- PVS is larger than n% of database allocated size
+      -- compare PVS size to database MAXSIZE, or to allocated size when MAXSIZE is not defined (Hyperscale, Managed Instance)
+      pvss.persistent_version_store_size_kb >= @PVSToMaxSizeMinThresholdRatio * COALESCE(ds.max_size_gb, ds.space_allocated_gb) * 1024 * 1024 -- PVS is larger than n% of database max/allocated size
       AND
-      persistent_version_store_size_kb > 1048576 -- for small databases, don't consider PVS smaller than 1 GB as large
+      pvss.persistent_version_store_size_kb > 1048576 -- don't consider PVS smaller than 1 GB as large
       )
       )
 )
@@ -2478,6 +2511,9 @@ SELECT 1270 AS tip_id,
              @NbspCRLF,
              'PVS size (GB): ', FORMAT(persistent_version_store_size_gb, 'N'), @CRLF,
              'online index version store size (GB): ', FORMAT(online_index_version_store_size_gb, 'N'), @CRLF,
+             'used data size (GB): ', FORMAT(space_used_gb, 'N'), @CRLF,
+             'allocated data size (GB): ', FORMAT(space_allocated_gb, 'N'), @CRLF,
+             'maximum database size (GB): ' + FORMAT(max_size_gb, 'N') + @CRLF, -- omit for Hyperscale and MI as not applicable
              'current aborted transaction count: ', FORMAT(current_aborted_transaction_count, '#,0'), @CRLF,
              'aborted transaction version cleaner start time (UTC): ', ISNULL(CONVERT(varchar(20), aborted_version_cleaner_start_time, 120), '-'), @CRLF,
              'aborted transaction version cleaner end time (UTC): ', ISNULL(CONVERT(varchar(20), aborted_version_cleaner_end_time, 120), '-'), @CRLF,
@@ -2492,7 +2528,7 @@ FROM pvs_db_stats;
 END TRY
 BEGIN CATCH
     IF ERROR_NUMBER() = 1222
-        INSERT INTO @LockTimeoutSkippedTip (tip_id)
+        INSERT INTO @SkippedTip (tip_id)
         VALUES (1270);
     ELSE
         THROW;
@@ -2536,6 +2572,8 @@ WHERE data_compression_desc IN ('NONE','ROW','PAGE')
       object_has_columnstore_indexes = 0
       AND
       object_has_columnstore_compressible_partitions = 1
+      AND
+      DATABASEPROPERTYEX(DB_NAME(), 'Updateability') = 'READ_WRITE' -- only produce this on primary
 ),
 table_operational_stats AS -- summarize operational stats for heap, CI, and NCI
 (
@@ -2630,7 +2668,7 @@ WHERE ccd.details IS NOT NULL;
 END TRY
 BEGIN CATCH
     IF ERROR_NUMBER() = 1222
-        INSERT INTO @LockTimeoutSkippedTip (tip_id)
+        INSERT INTO @SkippedTip (tip_id)
         VALUES (1290);
     ELSE
         THROW;
@@ -2931,7 +2969,7 @@ END;
 END TRY
 BEGIN CATCH
     IF ERROR_NUMBER() = 1222
-        INSERT INTO @LockTimeoutSkippedTip (tip_id)
+        INSERT INTO @SkippedTip (tip_id)
         VALUES (1380);
     ELSE
         THROW;
@@ -2986,7 +3024,7 @@ IF @ViewServerStateIndicator = 0
    OR
    EXISTS (SELECT 1 FROM @TipDefinition WHERE execute_indicator = 0)
    OR
-   EXISTS (SELECT 1 FROM @LockTimeoutSkippedTip)
+   EXISTS (SELECT 1 FROM @SkippedTip)
 BEGIN
     WITH tip AS
     (
@@ -2994,12 +3032,12 @@ BEGIN
            td.tip_name,
            CASE WHEN @ViewServerStateIndicator = 0 AND td.required_permission = 'VIEW SERVER STATE' THEN 'insufficient permissions'
                 WHEN td.execute_indicator = 0 THEN 'user-specified exclusions'
-                WHEN st.tip_id IS NOT NULL THEN 'lock timeout'
+                WHEN st.tip_id IS NOT NULL THEN st.reason
                 ELSE NULL
            END
            AS skipped_reason
     FROM @TipDefinition AS td
-    LEFT JOIN @LockTimeoutSkippedTip AS st
+    LEFT JOIN @SkippedTip AS st
     ON td.tip_id = st.tip_id
     ),
     skipped_tip AS
