@@ -1,6 +1,6 @@
 # Readme
 
-Execute the `get-sqldb-tips.sql` script to get tips for improving database design, health, and performance in [Azure SQL Database](https://azure.microsoft.com/services/sql-database/).
+Execute the [`get-sqldb-tips.sql`](../../releases/latest) script to get tips for improving database design, health, and performance in [Azure SQL Database](https://azure.microsoft.com/services/sql-database/).
 
 ## Quickstart
 
