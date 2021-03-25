@@ -167,7 +167,13 @@ DECLARE
 @NoIndexTablesMinRowCountThreshold int = 500,
 
 -- 1410: The minimum ratio of the number of no-index tables to the total number of tables to be considered significant
-@NoIndexMinTableCountRatio decimal(3,2) = 0.2
+@NoIndexMinTableCountRatio decimal(3,2) = 0.2,
+
+-- 1420: The minimum ratio of total time spend waiting on locks during the interval to the interval duration to be considered significant
+@LockBlockingTimeThresholdRatio decimal(3,2) = 0.1,
+
+-- 1420: The minumum number of blocked tasks observed at the time of each 20-second snapshot to be considered significant
+@LockBlockingBlockedTaskThreshold int = 1
 ;
 
 DECLARE @ExecStartTime datetimeoffset = SYSDATETIMEOFFSET();
@@ -281,7 +287,8 @@ VALUES
 (1, 1380, 'Notable network connectivity events found',                30, 'https://aka.ms/sqldbtipswiki#tip_id-1380', 'VIEW SERVER STATE'),
 (1, 1390, 'Instance CPU utilization is high',                         60, 'https://aka.ms/sqldbtipswiki#tip_id-1390', 'VIEW DATABASE STATE'),
 (1, 1400, 'Some statistics may be out of date',                       70, 'https://aka.ms/sqldbtipswiki#tip_id-1400', 'VIEW DATABASE STATE'),
-(1, 1410, 'Many tables do not have any indexes',                      60, 'https://aka.ms/sqldbtipswiki#tip_id-1410', 'VIEW DATABASE STATE')
+(1, 1410, 'Many tables do not have any indexes',                      60, 'https://aka.ms/sqldbtipswiki#tip_id-1410', 'VIEW DATABASE STATE'),
+(1, 1420, 'Significant lock blocking has recently occurred',          70, 'https://aka.ms/sqldbtipswiki#tip_id-1420', 'VIEW SERVER STATE')
 ;
 
 -- Top queries
@@ -769,7 +776,8 @@ WITH
 object_size AS
 (
 SELECT object_id,
-       SUM(used_page_count) * 8 / 1024. AS object_size_mb
+       SUM(used_page_count) * 8 / 1024. AS object_size_mb,
+       SUM(row_count) AS object_row_count
 FROM sys.dm_db_partition_stats
 WHERE index_id IN (0,1) -- clustered index or heap
 GROUP BY object_id
@@ -781,7 +789,9 @@ SELECT QUOTENAME(OBJECT_SCHEMA_NAME(o.object_id)) COLLATE DATABASE_DEFAULT AS sc
        QUOTENAME(i.name) COLLATE DATABASE_DEFAULT AS index_name,
        i.type_desc COLLATE DATABASE_DEFAULT AS index_type,
        o.object_id,
-       i.index_id
+       i.index_id,
+       os.object_size_mb,
+       os.object_row_count
 FROM sys.objects AS o
 INNER JOIN sys.indexes AS i
 ON o.object_id = i.object_id
@@ -832,6 +842,8 @@ SELECT 1100 AS tip_id,
                        CAST(CONCAT(
                                   'schema: ', schema_name, 
                                   ', object: ', object_name, 
+                                  ', object size (MB): ', FORMAT(object_size_mb, '#,0.00'),
+                                  ', object row count: ', FORMAT(object_row_count, '#,0'),
                                   ', index: ', index_name, 
                                   ', type: ', index_type,
                                   ', object_id: ', CAST(object_id AS varchar(11)),
@@ -2978,6 +2990,76 @@ BEGIN CATCH
 END CATCH;
 
 END;
+
+-- Significant recent blocking
+IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1420) AND execute_indicator = 1)
+
+WITH
+blocking_snapshot AS
+(
+SELECT snapshot_time,
+       duration_ms,
+       blocked_task_count,
+       delta_lock_wait_count,
+       delta_lock_wait_time_ms,
+       IIF(delta_lock_wait_time_ms > @LockBlockingTimeThresholdRatio * duration_ms OR blocked_task_count >= @LockBlockingBlockedTaskThreshold, 1, 0) AS blocking_indicator
+FROM sys.dm_resource_governor_workload_groups_history_ex
+WHERE @EngineEdition = 5
+      AND
+      name like 'UserPrimaryGroup.DB%'
+      AND
+      TRY_CAST(RIGHT(name, LEN(name) - LEN('UserPrimaryGroup.DB') - 2) AS int) = DB_ID()
+),
+pre_packed_blocking_snapshot AS
+(
+SELECT snapshot_time,
+       duration_ms,
+       blocked_task_count,
+       delta_lock_wait_count,
+       delta_lock_wait_time_ms,
+       blocking_indicator,
+       ROW_NUMBER() OVER (ORDER BY snapshot_time)
+       -
+       SUM(blocking_indicator) OVER (ORDER BY snapshot_time ROWS UNBOUNDED PRECEDING)
+       AS grouping_helper
+FROM blocking_snapshot
+),
+packed_blocking_snapshot AS
+(
+SELECT MIN(snapshot_time) AS min_snapshot_time,
+       MAX(snapshot_time) AS max_snapshot_time,
+       AVG(duration_ms) AS avg_snapshot_interval_duration_ms,
+       MIN(blocked_task_count) AS min_blocked_task_count,
+       MAX(blocked_task_count) AS max_blocked_task_count,
+       SUM(delta_lock_wait_count) AS total_lock_waits,
+       SUM(delta_lock_wait_time_ms) / 1000 AS total_lock_wait_time_seconds
+FROM pre_packed_blocking_snapshot
+WHERE blocking_indicator = 1
+GROUP BY grouping_helper
+)
+INSERT INTO @DetectedTip (tip_id, details)
+SELECT 1420 AS tip_id,
+       CONCAT(
+             @NbspCRLF,
+             'Significant lock blocking has occurred during the following time intervals (most recent first):',
+             @CRLF, @CRLF,
+             STRING_AGG(
+                       CAST(CONCAT(
+                                  'Interval start time: ', FORMAT(DATEADD(millisecond, -avg_snapshot_interval_duration_ms, min_snapshot_time), 's'),
+                                  ', end time: ', FORMAT(max_snapshot_time, 's'),
+                                  ', duration: ', DATEADD(second, DATEDIFF(second, DATEADD(millisecond, -avg_snapshot_interval_duration_ms, min_snapshot_time), max_snapshot_time), CAST('00:00:00' AS time(0))),
+                                  ', total lock wait time: ', DATEADD(second, total_lock_wait_time_seconds, CAST('00:00:00' AS time(0))),
+                                  ', minimum observed blocked tasks: ', FORMAT(min_blocked_task_count, '#,0'),
+                                  ', maximum observed blocked tasks: ', FORMAT(max_blocked_task_count, '#,0'),
+                                  ', total lock waits: ', FORMAT(total_lock_waits, '#,0')
+                                  ) AS nvarchar(max)), @CRLF
+                       ),
+             @CRLF
+             )
+       AS details
+FROM packed_blocking_snapshot 
+HAVING COUNT(1) > 0
+;
 
 END; -- end tips requiring VIEW SERVER STATE
 
