@@ -773,13 +773,34 @@ IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1100) AND execute_indic
 BEGIN TRY
 
 WITH 
+partition_size AS
+(
+SELECT object_id,
+       used_page_count,
+       row_count
+FROM sys.dm_db_partition_stats
+WHERE index_id IN (0,1)
+UNION
+-- special index types
+SELECT it.parent_id,
+       ps.used_page_count,
+       0 AS row_count
+FROM sys.dm_db_partition_stats AS ps
+INNER JOIN sys.internal_tables AS it
+ON ps.object_id = it.object_id
+WHERE it.internal_type_desc IN (
+                               'XML_INDEX_NODES','SELECTIVE_XML_INDEX_NODE_TABLE', -- XML indexes
+                               'EXTENDED_INDEXES', -- spatial indexes
+                               'FULLTEXT_INDEX_MAP','FULLTEXT_AVDL','FULLTEXT_COMP_FRAGMENT','FULLTEXT_DOCID_STATUS','FULLTEXT_INDEXED_DOCID','FULLTEXT_DOCID_FILTER','FULLTEXT_DOCID_MAP', -- fulltext indexes
+                               'SEMPLAT_DOCUMENT_INDEX_TABLE','SEMPLAT_TAG_INDEX_TABLE' -- semantic search indexes
+                               )
+),
 object_size AS
 (
 SELECT object_id,
        SUM(used_page_count) * 8 / 1024. AS object_size_mb,
        SUM(row_count) AS object_row_count
-FROM sys.dm_db_partition_stats
-WHERE index_id IN (0,1) -- clustered index or heap
+FROM partition_size
 GROUP BY object_id
 ),
 guid_index AS
@@ -1327,7 +1348,7 @@ IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1400) AND execute_indic
 BEGIN TRY
 
 WITH
-object_size AS
+object_row_count AS
 (
 SELECT object_id,
        SUM(row_count) AS object_row_count
@@ -1350,13 +1371,13 @@ SELECT OBJECT_SCHEMA_NAME(s.object_id) COLLATE DATABASE_DEFAULT AS schema_name,
        sp.last_updated,
        sp.unfiltered_rows,
        sp.rows_sampled,
-       os.object_row_count,
+       orc.object_row_count,
        sp.modification_counter
 FROM sys.stats AS s
 INNER JOIN sys.objects AS o
 ON s.object_id = o.object_id
-INNER JOIN object_size AS os
-ON o.object_id = os.object_id
+INNER JOIN object_row_count AS orc
+ON o.object_id = orc.object_id
 CROSS APPLY sys.dm_db_stats_properties(s.object_id, s.stats_id) AS sp
 WHERE (
       o.is_ms_shipped = 0
@@ -1366,13 +1387,13 @@ WHERE (
       AND
       (
       -- object cardinality has changed substantially since last stats update
-      ABS(ISNULL(sp.unfiltered_rows, 0) - os.object_row_count) / NULLIF(((ISNULL(sp.unfiltered_rows, 0) + os.object_row_count) / 2), 0) > @StaleStatsCardinalityChangeMinDifference
+      ABS(ISNULL(sp.unfiltered_rows, 0) - orc.object_row_count) / NULLIF(((ISNULL(sp.unfiltered_rows, 0) + orc.object_row_count) / 2), 0) > @StaleStatsCardinalityChangeMinDifference
       OR
       -- no stats blob created
-      (sp.last_updated IS NULL AND os.object_row_count > 0)
+      (sp.last_updated IS NULL AND orc.object_row_count > 0)
       OR
       -- naive: stats for an object with many modifications not updated for a substantial time interval
-      (sp.modification_counter > @StaleStatsMinModificationCountRatio * os.object_row_count AND DATEDIFF(day, sp.last_updated, SYSDATETIME()) > @StaleStatsMinAgeThresholdDays)
+      (sp.modification_counter > @StaleStatsMinModificationCountRatio * orc.object_row_count AND DATEDIFF(day, sp.last_updated, SYSDATETIME()) > @StaleStatsMinAgeThresholdDays)
       )
 )
 INSERT INTO @DetectedTip (tip_id, details)
@@ -1428,7 +1449,7 @@ IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1410) AND execute_indic
 BEGIN TRY
 
 WITH
-object_size AS
+object_row_count AS
 (
 SELECT object_id,
        SUM(row_count) AS object_row_count
@@ -1444,14 +1465,14 @@ SELECT QUOTENAME(OBJECT_SCHEMA_NAME(t.object_id)) COLLATE DATABASE_DEFAULT AS sc
           ISNULL(i.no_index_indicator, 0) = 1
           AND
           -- exclude small tables
-          os.object_row_count > @NoIndexTablesMinRowCountThreshold,
+          orc.object_row_count > @NoIndexTablesMinRowCountThreshold,
           1,
           0
           )
        AS no_index_indicator
 FROM sys.tables AS t
-INNER JOIN object_size AS os
-ON t.object_id = os.object_id
+INNER JOIN object_row_count AS orc
+ON t.object_id = orc.object_id
 OUTER APPLY (
             SELECT TOP (1) 1 AS no_index_indicator
             FROM sys.indexes AS i
@@ -2572,6 +2593,16 @@ ON p.partition_id = ps.partition_id
    p.object_id = ps.object_id
    AND
    p.index_id = ps.index_id
+WHERE -- restrict to objects that do not have column data types not supported for CCI
+      NOT EXISTS (
+                 SELECT 1
+                 FROM sys.columns AS c
+                 INNER JOIN sys.types AS t
+                 ON c.system_type_id = t.system_type_id
+                 WHERE c.object_id = p.object_id
+                       AND
+                       t.name IN ('text','ntext','image','timestamp','sql_variant','hierarchyid','geometry','geography','xml')
+                 )
 ),
 candidate_partition AS
 (
