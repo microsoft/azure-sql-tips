@@ -772,7 +772,7 @@ FROM sys.dm_db_partition_stats
 WHERE index_id IN (0,1)
 UNION
 -- special index types
-SELECT it.parent_id,
+SELECT it.parent_object_id,
        ps.used_page_count,
        0 AS row_count
 FROM sys.dm_db_partition_stats AS ps
