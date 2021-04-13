@@ -173,7 +173,13 @@ DECLARE
 @LockBlockingTimeThresholdRatio decimal(3,2) = 0.1,
 
 -- 1420: The minumum number of blocked tasks observed at the time of each 20-second snapshot to be considered significant
-@LockBlockingBlockedTaskThreshold int = 1
+@LockBlockingBlockedTaskThreshold int = 1,
+
+-- 1430: The minimum number of requests in an interval to start considering if query compilations are high
+@QueryCompilationRequestCountThreshold smallint = 100,
+
+-- 1430: The minimum ratio of query compilations (optimizations) to the number of requests to be considered significant
+@QueryCompilationRequestThresholdRatio decimal(3,2) = 0.15
 ;
 
 DECLARE @ExecStartTime datetimeoffset = SYSDATETIMEOFFSET();
@@ -288,7 +294,8 @@ VALUES
 (1, 1390, 'Instance CPU utilization is high',                         60, 'https://aka.ms/sqldbtipswiki#tip_id-1390', 'VIEW DATABASE STATE'),
 (1, 1400, 'Some statistics may be out of date',                       70, 'https://aka.ms/sqldbtipswiki#tip_id-1400', 'VIEW DATABASE STATE'),
 (1, 1410, 'Many tables do not have any indexes',                      60, 'https://aka.ms/sqldbtipswiki#tip_id-1410', 'VIEW DATABASE STATE'),
-(1, 1420, 'Significant lock blocking has recently occurred',          70, 'https://aka.ms/sqldbtipswiki#tip_id-1420', 'VIEW SERVER STATE')
+(1, 1420, 'Significant lock blocking has recently occurred',          70, 'https://aka.ms/sqldbtipswiki#tip_id-1420', 'VIEW SERVER STATE'),
+(1, 1430, 'The number of recent query compilations is high',          80, 'https://aka.ms/sqldbtipswiki#tip_id-1430', 'VIEW SERVER STATE')
 ;
 
 -- Top queries
@@ -610,6 +617,9 @@ ON (t.tip_id = 1000 AND mc.value NOT BETWEEN 1 AND 8 AND (mc.value_for_secondary
    (t.tip_id = 1010 AND mc.value NOT BETWEEN 1 AND 8 AND mc.value_for_secondary BETWEEN 1 AND 8)
    OR
    (t.tip_id = 1020 AND mc.value BETWEEN 1 AND 8 AND mc.value_for_secondary NOT BETWEEN 1 AND 8)
+INNER JOIN @TipDefinition AS td
+ON t.tip_id = td.tip_id
+WHERE td.execute_indicator = 1
 ;
 
 -- Compatibility level
@@ -649,12 +659,14 @@ WITH autostats AS
 (
 SELECT t.tip_id
 FROM sys.databases AS d
-JOIN (
-     VALUES (1040),(1050)
-     ) AS t (tip_id)
+INNER JOIN (
+           VALUES (1040),(1050)
+           ) AS t (tip_id)
 ON (t.tip_id = 1040 AND d.is_auto_create_stats_on = 0)
    OR
    (t.tip_id = 1050 AND d.is_auto_update_stats_on = 0)
+INNER JOIN @TipDefinition AS td
+ON t.tip_id = td.tip_id
 WHERE d.name = DB_NAME()
       AND
       (
@@ -662,6 +674,8 @@ WHERE d.name = DB_NAME()
       OR
       d.is_auto_update_stats_on = 0
       )
+      AND
+      td.execute_indicator = 1
 )
 INSERT INTO @DetectedTip (tip_id)
 SELECT tip_id
@@ -732,7 +746,11 @@ ON (t.tip_id = 1070 AND qso.actual_state_desc = 'OFF')
    (t.tip_id = 1071 AND qso.actual_state_desc = 'READ_ONLY')
    OR
    (t.tip_id = 1072 AND qso.query_capture_mode_desc = 'NONE')
+INNER JOIN @TipDefinition AS td
+ON t.tip_id = td.tip_id
 WHERE DATABASEPROPERTYEX(DB_NAME(), 'Updateability') = 'READ_WRITE' -- only produce this on primary
+      AND
+      td.execute_indicator = 1
 ;
 
 END TRY
@@ -773,13 +791,34 @@ IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1100) AND execute_indic
 BEGIN TRY
 
 WITH 
+partition_size AS
+(
+SELECT object_id,
+       used_page_count,
+       row_count
+FROM sys.dm_db_partition_stats
+WHERE index_id IN (0,1)
+UNION
+-- special index types
+SELECT it.parent_object_id,
+       ps.used_page_count,
+       0 AS row_count
+FROM sys.dm_db_partition_stats AS ps
+INNER JOIN sys.internal_tables AS it
+ON ps.object_id = it.object_id
+WHERE it.internal_type_desc IN (
+                               'XML_INDEX_NODES','SELECTIVE_XML_INDEX_NODE_TABLE', -- XML indexes
+                               'EXTENDED_INDEXES', -- spatial indexes
+                               'FULLTEXT_INDEX_MAP','FULLTEXT_AVDL','FULLTEXT_COMP_FRAGMENT','FULLTEXT_DOCID_STATUS','FULLTEXT_INDEXED_DOCID','FULLTEXT_DOCID_FILTER','FULLTEXT_DOCID_MAP', -- fulltext indexes
+                               'SEMPLAT_DOCUMENT_INDEX_TABLE','SEMPLAT_TAG_INDEX_TABLE' -- semantic search indexes
+                               )
+),
 object_size AS
 (
 SELECT object_id,
        SUM(used_page_count) * 8 / 1024. AS object_size_mb,
        SUM(row_count) AS object_row_count
-FROM sys.dm_db_partition_stats
-WHERE index_id IN (0,1) -- clustered index or heap
+FROM partition_size
 GROUP BY object_id
 ),
 guid_index AS
@@ -1327,7 +1366,7 @@ IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1400) AND execute_indic
 BEGIN TRY
 
 WITH
-object_size AS
+object_row_count AS
 (
 SELECT object_id,
        SUM(row_count) AS object_row_count
@@ -1350,13 +1389,13 @@ SELECT OBJECT_SCHEMA_NAME(s.object_id) COLLATE DATABASE_DEFAULT AS schema_name,
        sp.last_updated,
        sp.unfiltered_rows,
        sp.rows_sampled,
-       os.object_row_count,
+       orc.object_row_count,
        sp.modification_counter
 FROM sys.stats AS s
 INNER JOIN sys.objects AS o
 ON s.object_id = o.object_id
-INNER JOIN object_size AS os
-ON o.object_id = os.object_id
+INNER JOIN object_row_count AS orc
+ON o.object_id = orc.object_id
 CROSS APPLY sys.dm_db_stats_properties(s.object_id, s.stats_id) AS sp
 WHERE (
       o.is_ms_shipped = 0
@@ -1366,13 +1405,13 @@ WHERE (
       AND
       (
       -- object cardinality has changed substantially since last stats update
-      ABS(ISNULL(sp.unfiltered_rows, 0) - os.object_row_count) / NULLIF(((ISNULL(sp.unfiltered_rows, 0) + os.object_row_count) / 2), 0) > @StaleStatsCardinalityChangeMinDifference
+      ABS(ISNULL(sp.unfiltered_rows, 0) - orc.object_row_count) / NULLIF(((ISNULL(sp.unfiltered_rows, 0) + orc.object_row_count) / 2), 0) > @StaleStatsCardinalityChangeMinDifference
       OR
       -- no stats blob created
-      (sp.last_updated IS NULL AND os.object_row_count > 0)
+      (sp.last_updated IS NULL AND orc.object_row_count > 0)
       OR
       -- naive: stats for an object with many modifications not updated for a substantial time interval
-      (sp.modification_counter > @StaleStatsMinModificationCountRatio * os.object_row_count AND DATEDIFF(day, sp.last_updated, SYSDATETIME()) > @StaleStatsMinAgeThresholdDays)
+      (sp.modification_counter > @StaleStatsMinModificationCountRatio * orc.object_row_count AND DATEDIFF(day, sp.last_updated, SYSDATETIME()) > @StaleStatsMinAgeThresholdDays)
       )
 )
 INSERT INTO @DetectedTip (tip_id, details)
@@ -1428,7 +1467,7 @@ IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1410) AND execute_indic
 BEGIN TRY
 
 WITH
-object_size AS
+object_row_count AS
 (
 SELECT object_id,
        SUM(row_count) AS object_row_count
@@ -1444,14 +1483,14 @@ SELECT QUOTENAME(OBJECT_SCHEMA_NAME(t.object_id)) COLLATE DATABASE_DEFAULT AS sc
           ISNULL(i.no_index_indicator, 0) = 1
           AND
           -- exclude small tables
-          os.object_row_count > @NoIndexTablesMinRowCountThreshold,
+          orc.object_row_count > @NoIndexTablesMinRowCountThreshold,
           1,
           0
           )
        AS no_index_indicator
 FROM sys.tables AS t
-INNER JOIN object_size AS os
-ON t.object_id = os.object_id
+INNER JOIN object_row_count AS orc
+ON t.object_id = orc.object_id
 OUTER APPLY (
             SELECT TOP (1) 1 AS no_index_indicator
             FROM sys.indexes AS i
@@ -1578,26 +1617,31 @@ LEFT JOIN tempdb.sys.dm_db_log_space_usage AS lsu
 ON tt.file_type = 'LOG'
 )
 INSERT INTO @DetectedTip (tip_id, details)
-SELECT CASE WHEN file_type = 'ROWS' AND space_type = 'allocated' THEN 1330
-            WHEN file_type = 'ROWS' AND space_type = 'used' THEN 1340
-            WHEN file_type = 'LOG' THEN 1350
-       END 
-       AS tip_id,
+SELECT td.tip_id,
        CONCAT(
              @NbspCRLF,
-             'tempdb ', CASE file_type WHEN 'ROWS' THEN 'data' WHEN 'LOG' THEN 'log' END , ' used size (MB): ', FORMAT(used_size_mb, '#,0.00'),
-             ', tempdb ', CASE file_type WHEN 'ROWS' THEN 'data' WHEN 'LOG' THEN 'log' END , ' allocated size (MB): ', FORMAT(allocated_size_mb, '#,0.00'),
-             ', tempdb ', CASE file_type WHEN 'ROWS' THEN 'data' WHEN 'LOG' THEN 'log' END, ' MAXSIZE (MB): ', FORMAT(max_size_mb, '#,0.00'),
-             ', tempdb data files: ' + CAST(count_files AS varchar(11)),
+             'tempdb ', CASE tt.file_type WHEN 'ROWS' THEN 'data' WHEN 'LOG' THEN 'log' END , ' used size (MB): ', FORMAT(tt.used_size_mb, '#,0.00'),
+             ', tempdb ', CASE tt.file_type WHEN 'ROWS' THEN 'data' WHEN 'LOG' THEN 'log' END , ' allocated size (MB): ', FORMAT(tt.allocated_size_mb, '#,0.00'),
+             ', tempdb ', CASE tt.file_type WHEN 'ROWS' THEN 'data' WHEN 'LOG' THEN 'log' END, ' MAXSIZE (MB): ', FORMAT(tt.max_size_mb, '#,0.00'),
+             ', tempdb data files: ' + CAST(tt.count_files AS varchar(11)),
              @CRLF
              )
        AS details
-FROM tempdb_tip
-WHERE (file_type = 'ROWS' AND space_type = 'allocated' AND allocated_size_mb / NULLIF(max_size_mb, 0) > @TempdbDataAllocatedToMaxsizeThresholdRatio)
+FROM tempdb_tip AS tt
+INNER JOIN @TipDefinition AS td
+ON CASE WHEN tt.file_type = 'ROWS' AND tt.space_type = 'allocated' THEN 1330
+        WHEN tt.file_type = 'ROWS' AND tt.space_type = 'used' THEN 1340
+        WHEN tt.file_type = 'LOG' THEN 1350
+   END = td.tip_id
+WHERE (
+      (tt.file_type = 'ROWS' AND tt.space_type = 'allocated' AND tt.allocated_size_mb / NULLIF(tt.max_size_mb, 0) > @TempdbDataAllocatedToMaxsizeThresholdRatio)
       OR
-      (file_type = 'ROWS' AND space_type = 'used' AND used_size_mb / NULLIF(max_size_mb, 0) > @TempdbDataUsedToMaxsizeThresholdRatio)
+      (tt.file_type = 'ROWS' AND tt.space_type = 'used' AND tt.used_size_mb / NULLIF(tt.max_size_mb, 0) > @TempdbDataUsedToMaxsizeThresholdRatio)
       OR
-      (file_type = 'LOG'  AND space_type = 'allocated' AND allocated_size_mb / NULLIF(max_size_mb, 0) > @TempdbLogAllocatedToMaxsizeThresholdRatio);
+      (tt.file_type = 'LOG'  AND tt.space_type = 'allocated' AND tt.allocated_size_mb / NULLIF(tt.max_size_mb, 0) > @TempdbLogAllocatedToMaxsizeThresholdRatio)
+      )
+      AND
+      td.execute_indicator = 1;
 
 END TRY
 BEGIN CATCH
@@ -2226,57 +2270,65 @@ SELECT MIN(recent_history_duration_minutes) AS recent_history_duration_minutes,
 FROM packed_io_rg_snapshot_impact
 )
 INSERT INTO @DetectedTip (tip_id, details)
-SELECT 1230 AS tip_id,
+SELECT td.tip_id,
        CONCAT(
              @NbspCRLF,
-             'In the last ', recent_history_duration_minutes,
-             ' minutes, there were ', count_io_rg_at_limit_intervals, 
-             ' time interval(s) when total data IO approached the workload group (database-level) IOPS limit of the service objective, ', FORMAT(primary_group_max_io, '#,0'), ' IOPS.', @CRLF,  @CRLF,
+             'In the last ', l.recent_history_duration_minutes,
+             ' minutes, there were ', l.count_io_rg_at_limit_intervals, 
+             ' time interval(s) when total data IO approached the workload group (database-level) IOPS limit of the service objective, ', FORMAT(l.primary_group_max_io, '#,0'), ' IOPS.', @CRLF,  @CRLF,
              'Aggregated across these intervals, IO statistics were: ', @CRLF, @CRLF,
-             'longest interval duration: ', FORMAT(longest_io_rg_at_limit_duration_seconds, '#,0'), ' seconds; ', @CRLF,
-             'total read IO time: ', FORMAT(total_read_time_ms, '#,0'), ' milliseconds; ', @CRLF,
-             'total queued read IO time: ', FORMAT(total_read_queued_time_ms, '#,0'), ' milliseconds; ', @CRLF,
-             'average read IOPS: ', FORMAT(avg_read_iops, '#,0'), '; ', @CRLF,
-             'maximum read IOPS: ', FORMAT(max_read_iops, '#,0'), '; ', @CRLF,
-             'average write IOPS: ', FORMAT(avg_write_iops, '#,0'), '; ', @CRLF,
-             'maximum write IOPS: ', FORMAT(max_write_iops, '#,0'), '; ', @CRLF,
-             'average background write IOPS: ', FORMAT(avg_background_write_iops, '#,0'), '; ', @CRLF,
-             'maximum background write IOPS: ', FORMAT(max_background_write_iops, '#,0'), '; ', @CRLF,
-             'average read IO throughput: ', FORMAT(avg_read_throughput_mbps, '#,0.00'), ' MBps; ', @CRLF,
-             'maximum read IO throughput: ', FORMAT(max_read_throughput_mbps, '#,0.00'), ' MBps; ', @CRLF,
-             'average background write IO throughput: ', FORMAT(avg_background_write_throughput_mbps, '#,0.00'), ' MBps; ', @CRLF,
-             'maximum background write IO throughput: ', FORMAT(max_background_write_throughput_mbps, '#,0.00'), ' MBps.',
+             'longest interval duration: ', FORMAT(l.longest_io_rg_at_limit_duration_seconds, '#,0'), ' seconds; ', @CRLF,
+             'total read IO time: ', FORMAT(l.total_read_time_ms, '#,0'), ' milliseconds; ', @CRLF,
+             'total queued read IO time: ', FORMAT(l.total_read_queued_time_ms, '#,0'), ' milliseconds; ', @CRLF,
+             'average read IOPS: ', FORMAT(l.avg_read_iops, '#,0'), '; ', @CRLF,
+             'maximum read IOPS: ', FORMAT(l.max_read_iops, '#,0'), '; ', @CRLF,
+             'average write IOPS: ', FORMAT(l.avg_write_iops, '#,0'), '; ', @CRLF,
+             'maximum write IOPS: ', FORMAT(l.max_write_iops, '#,0'), '; ', @CRLF,
+             'average background write IOPS: ', FORMAT(l.avg_background_write_iops, '#,0'), '; ', @CRLF,
+             'maximum background write IOPS: ', FORMAT(l.max_background_write_iops, '#,0'), '; ', @CRLF,
+             'average read IO throughput: ', FORMAT(l.avg_read_throughput_mbps, '#,0.00'), ' MBps; ', @CRLF,
+             'maximum read IO throughput: ', FORMAT(l.max_read_throughput_mbps, '#,0.00'), ' MBps; ', @CRLF,
+             'average background write IO throughput: ', FORMAT(l.avg_background_write_throughput_mbps, '#,0.00'), ' MBps; ', @CRLF,
+             'maximum background write IO throughput: ', FORMAT(l.max_background_write_throughput_mbps, '#,0.00'), ' MBps.',
              @CRLF
              )
        AS details
-FROM packed_io_rg_snapshot_limit_agg
-WHERE count_io_rg_at_limit_intervals > 0
+FROM packed_io_rg_snapshot_limit_agg AS l
+INNER JOIN @TipDefinition AS td
+ON td.tip_id = 1230
+WHERE l.count_io_rg_at_limit_intervals > 0
+      AND
+      td.execute_indicator = 1
 UNION
-SELECT 1240 AS tip_id,
+SELECT td.tip_id,
        CONCAT(
              @NbspCRLF,
-             'In the last ', recent_history_duration_minutes,
-             ' minutes, there were ', count_io_rg_impact_intervals, 
+             'In the last ', i.recent_history_duration_minutes,
+             ' minutes, there were ', i.count_io_rg_impact_intervals, 
              ' time interval(s) when workload group (database-level) resource governance for the selected service objective was significantly delaying IO requests.', @CRLF, @CRLF,
              'Aggregated across these intervals, IO statistics were: ', @CRLF, @CRLF,
-             'longest interval duration: ', FORMAT(longest_io_rg_impact_duration_seconds, '#,0'), ' seconds; ', @CRLF,
-             'total read IO time: ', FORMAT(total_read_time_ms, '#,0'), ' milliseconds; ', @CRLF,
-             'total queued read IO time: ', FORMAT(total_read_queued_time_ms, '#,0'), ' milliseconds; ', @CRLF,
-             'average read IOPS: ', FORMAT(avg_read_iops, '#,0'), '; ', @CRLF,
-             'maximum read IOPS: ', FORMAT(max_read_iops, '#,0'), '; ', @CRLF,
-             'average write IOPS: ', FORMAT(avg_write_iops, '#,0'), '; ', @CRLF,
-             'maximum write IOPS: ', FORMAT(max_write_iops, '#,0'), '; ', @CRLF,
-             'average background write IOPS: ', FORMAT(avg_background_write_iops, '#,0'), '; ', @CRLF,
-             'maximum background write IOPS: ', FORMAT(max_background_write_iops, '#,0'), '; ', @CRLF,
-             'average read IO throughput: ', FORMAT(avg_read_throughput_mbps, '#,0.00'), ' MBps; ', @CRLF,
-             'maximum read IO throughput: ', FORMAT(max_read_throughput_mbps, '#,0.00'), ' MBps; ', @CRLF,
-             'average background write IO throughput: ', FORMAT(avg_background_write_throughput_mbps, '#,0.00'), ' MBps; ', @CRLF,
-             'maximum background write IO throughput: ', FORMAT(max_background_write_throughput_mbps, '#,0.00'), ' MBps.',
+             'longest interval duration: ', FORMAT(i.longest_io_rg_impact_duration_seconds, '#,0'), ' seconds; ', @CRLF,
+             'total read IO time: ', FORMAT(i.total_read_time_ms, '#,0'), ' milliseconds; ', @CRLF,
+             'total queued read IO time: ', FORMAT(i.total_read_queued_time_ms, '#,0'), ' milliseconds; ', @CRLF,
+             'average read IOPS: ', FORMAT(i.avg_read_iops, '#,0'), '; ', @CRLF,
+             'maximum read IOPS: ', FORMAT(i.max_read_iops, '#,0'), '; ', @CRLF,
+             'average write IOPS: ', FORMAT(i.avg_write_iops, '#,0'), '; ', @CRLF,
+             'maximum write IOPS: ', FORMAT(i.max_write_iops, '#,0'), '; ', @CRLF,
+             'average background write IOPS: ', FORMAT(i.avg_background_write_iops, '#,0'), '; ', @CRLF,
+             'maximum background write IOPS: ', FORMAT(i.max_background_write_iops, '#,0'), '; ', @CRLF,
+             'average read IO throughput: ', FORMAT(i.avg_read_throughput_mbps, '#,0.00'), ' MBps; ', @CRLF,
+             'maximum read IO throughput: ', FORMAT(i.max_read_throughput_mbps, '#,0.00'), ' MBps; ', @CRLF,
+             'average background write IO throughput: ', FORMAT(i.avg_background_write_throughput_mbps, '#,0.00'), ' MBps; ', @CRLF,
+             'maximum background write IO throughput: ', FORMAT(i.max_background_write_throughput_mbps, '#,0.00'), ' MBps.',
              @CRLF
              )
        AS details
-FROM packed_io_rg_snapshot_impact_agg
-WHERE count_io_rg_impact_intervals > 0
+FROM packed_io_rg_snapshot_impact_agg AS i
+INNER JOIN @TipDefinition AS td
+ON td.tip_id = 1240
+WHERE i.count_io_rg_impact_intervals > 0
+      AND
+      td.execute_indicator = 1
 ;
 
 -- Data IO reaching user resource pool SLO limit, or significant IO RG impact at user resource pool level
@@ -2419,7 +2471,7 @@ SELECT MIN(recent_history_duration_minutes) AS recent_history_duration_minutes,
 FROM packed_io_rg_snapshot_impact
 )
 INSERT INTO @DetectedTip (tip_id, details)
-SELECT 1250 AS tip_id,
+SELECT td.tip_id,
        CONCAT(
              @NbspCRLF,
              'In the last ', l.recent_history_duration_minutes,
@@ -2439,12 +2491,16 @@ SELECT 1250 AS tip_id,
              )
        AS details
 FROM packed_io_rg_snapshot_limit_agg AS l
+INNER JOIN @TipDefinition AS td
+ON td.tip_id = 1250
 CROSS JOIN sys.database_service_objectives AS dso
 WHERE l.count_io_rg_at_limit_intervals > 0
       AND
       dso.database_id = DB_ID()
+      AND
+      td.execute_indicator = 1
 UNION
-SELECT 1260 AS tip_id,
+SELECT td.tip_id,
        CONCAT(
              @NbspCRLF,
              'In the last ', i.recent_history_duration_minutes,
@@ -2464,10 +2520,14 @@ SELECT 1260 AS tip_id,
              )
        AS details
 FROM packed_io_rg_snapshot_impact_agg AS i
+INNER JOIN @TipDefinition AS td
+ON td.tip_id = 1260
 CROSS JOIN sys.database_service_objectives AS dso
 WHERE i.count_io_rg_impact_intervals > 0
       AND
       dso.database_id = DB_ID()
+      AND
+      td.execute_indicator = 1
 ;
 
 -- Large PVS
@@ -2572,6 +2632,16 @@ ON p.partition_id = ps.partition_id
    p.object_id = ps.object_id
    AND
    p.index_id = ps.index_id
+WHERE -- restrict to objects that do not have column data types not supported for CCI
+      NOT EXISTS (
+                 SELECT 1
+                 FROM sys.columns AS c
+                 INNER JOIN sys.types AS t
+                 ON c.system_type_id = t.system_type_id
+                 WHERE c.object_id = p.object_id
+                       AND
+                       t.name IN ('text','ntext','image','timestamp','sql_variant','hierarchyid','geometry','geography','xml')
+                 )
 ),
 candidate_partition AS
 (
@@ -3041,7 +3111,7 @@ INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1420 AS tip_id,
        CONCAT(
              @NbspCRLF,
-             'Significant lock blocking has occurred during the following time intervals (most recent first):',
+             'Significant lock blocking has occurred during the following time intervals (UTC):',
              @CRLF, @CRLF,
              STRING_AGG(
                        CAST(CONCAT(
@@ -3058,6 +3128,71 @@ SELECT 1420 AS tip_id,
              )
        AS details
 FROM packed_blocking_snapshot 
+HAVING COUNT(1) > 0
+;
+
+-- High query compilations
+IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1430) AND execute_indicator = 1)
+
+WITH
+high_compilation_snapshot AS
+(
+SELECT snapshot_time,
+       duration_ms,
+       delta_request_count,
+       delta_query_optimizations,
+       IIF(delta_query_optimizations > @QueryCompilationRequestThresholdRatio * delta_request_count AND delta_request_count >= @QueryCompilationRequestCountThreshold, 1, 0) AS high_compilation_indicator
+FROM sys.dm_resource_governor_workload_groups_history_ex
+WHERE @EngineEdition = 5
+      AND
+      name like 'UserPrimaryGroup.DB%'
+      AND
+      TRY_CAST(RIGHT(name, LEN(name) - LEN('UserPrimaryGroup.DB') - 2) AS int) = DB_ID()
+),
+pre_packed_high_compilation_snapshot AS
+(
+SELECT snapshot_time,
+       duration_ms,
+       delta_request_count,
+       delta_query_optimizations,
+       high_compilation_indicator,
+       ROW_NUMBER() OVER (ORDER BY snapshot_time)
+       -
+       SUM(high_compilation_indicator) OVER (ORDER BY snapshot_time ROWS UNBOUNDED PRECEDING)
+       AS grouping_helper
+FROM high_compilation_snapshot
+),
+packed_high_compilation_snapshot AS
+(
+SELECT MIN(snapshot_time) AS min_snapshot_time,
+       MAX(snapshot_time) AS max_snapshot_time,
+       AVG(duration_ms) AS avg_snapshot_interval_duration_ms,
+       SUM(delta_request_count) AS total_requests,
+       SUM(delta_query_optimizations) AS total_compilations
+FROM pre_packed_high_compilation_snapshot
+WHERE high_compilation_indicator = 1
+GROUP BY grouping_helper
+)
+INSERT INTO @DetectedTip (tip_id, details)
+SELECT 1430 AS tip_id,
+       CONCAT(
+             @NbspCRLF,
+             'Time intervals with a high number of query compilations (UTC):',
+             @CRLF, @CRLF,
+             STRING_AGG(
+                       CAST(CONCAT(
+                                  'Interval start time: ', FORMAT(DATEADD(millisecond, -avg_snapshot_interval_duration_ms, min_snapshot_time), 's'),
+                                  ', end time: ', FORMAT(max_snapshot_time, 's'),
+                                  ', duration: ', DATEADD(second, DATEDIFF(second, DATEADD(millisecond, -avg_snapshot_interval_duration_ms, min_snapshot_time), max_snapshot_time), CAST('00:00:00' AS time(0))),
+                                  ', total requests: ', FORMAT(total_requests, '#,0'),
+                                  ', total compilations: ', FORMAT(total_compilations, '#,0'),
+                                  ', query compilation rate: ', FORMAT(LEAST(total_compilations * 1.0 / total_requests, 1), 'P')
+                                  ) AS nvarchar(max)), @CRLF
+                       ),
+             @CRLF
+             )
+       AS details
+FROM packed_high_compilation_snapshot 
 HAVING COUNT(1) > 0
 ;
 
