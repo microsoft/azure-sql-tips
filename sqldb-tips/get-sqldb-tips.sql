@@ -1512,14 +1512,14 @@ SELECT 1410 AS tip_id,
              'tables with ', FORMAT(@NoIndexTablesMinRowCountThreshold, '#,0'), 
              ' or more rows and no indexes: ', FORMAT(SUM(no_index_indicator), '#,0'),
              @CRLF, @CRLF,
-             STRING_AGG(
-                       IIF(
-                          no_index_indicator = 1,
-                          CONCAT(
-                                schema_name, '.', table_name
-                                ),
-                          NULL
-                          ),
+             STRING_AGG(CAST(
+                            IIF(
+                               no_index_indicator = 1,
+                               CONCAT(schema_name, '.', table_name),
+                               NULL
+                               )
+                            AS nvarchar(max)
+                            ),
                        @CRLF 
                        ) WITHIN GROUP (ORDER BY schema_name, table_name),
              @CRLF
@@ -2915,7 +2915,7 @@ DECLARE @crb TABLE (
 -- stage XML in a table variable to enable parallelism when processing XQuery expressions
 WITH crb AS
 (
-SELECT DATEADD(millisecond, -1 * (si.cpu_ticks/(si.cpu_ticks/si.ms_ticks) - rb.timestamp), CURRENT_TIMESTAMP) AS event_time,
+SELECT DATEADD(second, -0.001 * (si.cpu_ticks/(si.cpu_ticks/si.ms_ticks) - rb.timestamp), CURRENT_TIMESTAMP) AS event_time,
        TRY_CAST(rb.record AS XML) AS record
 FROM sys.dm_os_ring_buffers AS rb
 CROSS JOIN sys.dm_os_sys_info AS si
