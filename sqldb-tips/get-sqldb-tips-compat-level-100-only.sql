@@ -274,7 +274,7 @@ VALUES
 (1, 1190, 'Transaction log IO is close to limit',                     70, 'https://aka.ms/sqldbtipswiki#tip_id-1190', 'VIEW DATABASE STATE'),
 (1, 1200, 'Plan cache is bloated by single-use plans',                90, 'https://aka.ms/sqldbtipswiki#tip_id-1200', 'VIEW DATABASE STATE'),
 (1, 1210, 'Missing indexes may be impacting performance',             70, 'https://aka.ms/sqldbtipswiki#tip_id-1210', 'VIEW SERVER STATE'),
-(1, 1220, 'Redo queue or a secondary replica is large',               60, 'https://aka.ms/sqldbtipswiki#tip_id-1220', 'VIEW DATABASE STATE'),
+(1, 1220, 'Redo queue on a secondary replica is large',               60, 'https://aka.ms/sqldbtipswiki#tip_id-1220', 'VIEW DATABASE STATE'),
 (1, 1230, 'Data IOPS are close to workload group limit',              70, 'https://aka.ms/sqldbtipswiki#tip_id-1230', 'VIEW SERVER STATE'),
 (1, 1240, 'Workload group IO governance impact is significant',       40, 'https://aka.ms/sqldbtipswiki#tip_id-1240', 'VIEW SERVER STATE'),
 (1, 1250, 'Data IOPS are close to resource pool limit',               70, 'https://aka.ms/sqldbtipswiki#tip_id-1250', 'VIEW SERVER STATE'),
@@ -1517,14 +1517,14 @@ SELECT 1410 AS tip_id,
              'tables with ', FORMAT(@NoIndexTablesMinRowCountThreshold, '#,0'), 
              ' or more rows and no indexes: ', FORMAT(SUM(no_index_indicator), '#,0'),
              @CRLF, @CRLF,
-             STRING_AGG(CAST(
-                            IIF(
-                               no_index_indicator = 1,
-                               CONCAT(schema_name, '.', table_name),
-                               NULL
-                               )
-                            AS nvarchar(max)
-                            ),
+             STRING_AGG(
+                       IIF(
+                          no_index_indicator = 1,
+                          CONCAT(
+                                schema_name, '.', table_name
+                                ),
+                          NULL
+                          ),
                        @CRLF 
                        ),
              @CRLF
@@ -2917,7 +2917,7 @@ DECLARE @crb TABLE (
 -- stage XML in a table variable to enable parallelism when processing XQuery expressions
 WITH crb AS
 (
-SELECT DATEADD(second, -0.001 * (si.cpu_ticks/(si.cpu_ticks/si.ms_ticks) - rb.timestamp), CURRENT_TIMESTAMP) AS event_time,
+SELECT DATEADD(millisecond, -1 * (si.cpu_ticks/(si.cpu_ticks/si.ms_ticks) - rb.timestamp), CURRENT_TIMESTAMP) AS event_time,
        TRY_CAST(rb.record AS XML) AS record
 FROM sys.dm_os_ring_buffers AS rb
 CROSS JOIN sys.dm_os_sys_info AS si
@@ -3102,7 +3102,7 @@ SELECT MIN(snapshot_time) AS min_snapshot_time,
        MIN(blocked_task_count) AS min_blocked_task_count,
        MAX(blocked_task_count) AS max_blocked_task_count,
        SUM(delta_lock_wait_count) AS total_lock_waits,
-       SUM(delta_lock_wait_time_ms) / 1000 AS total_lock_wait_time_seconds
+       SUM(delta_lock_wait_time_ms) / 1000. AS total_lock_wait_time_seconds
 FROM pre_packed_blocking_snapshot
 WHERE blocking_indicator = 1
 GROUP BY grouping_helper
