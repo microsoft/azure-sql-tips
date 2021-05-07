@@ -274,7 +274,7 @@ VALUES
 (1, 1190, 'Transaction log IO is close to limit',                     70, 'https://aka.ms/sqldbtipswiki#tip_id-1190', 'VIEW DATABASE STATE'),
 (1, 1200, 'Plan cache is bloated by single-use plans',                90, 'https://aka.ms/sqldbtipswiki#tip_id-1200', 'VIEW DATABASE STATE'),
 (1, 1210, 'Missing indexes may be impacting performance',             70, 'https://aka.ms/sqldbtipswiki#tip_id-1210', 'VIEW SERVER STATE'),
-(1, 1220, 'Redo queue or a secondary replica is large',               60, 'https://aka.ms/sqldbtipswiki#tip_id-1220', 'VIEW DATABASE STATE'),
+(1, 1220, 'Redo queue on a secondary replica is large',               60, 'https://aka.ms/sqldbtipswiki#tip_id-1220', 'VIEW DATABASE STATE'),
 (1, 1230, 'Data IOPS are close to workload group limit',              70, 'https://aka.ms/sqldbtipswiki#tip_id-1230', 'VIEW SERVER STATE'),
 (1, 1240, 'Workload group IO governance impact is significant',       40, 'https://aka.ms/sqldbtipswiki#tip_id-1240', 'VIEW SERVER STATE'),
 (1, 1250, 'Data IOPS are close to resource pool limit',               70, 'https://aka.ms/sqldbtipswiki#tip_id-1250', 'VIEW SERVER STATE'),
@@ -295,7 +295,8 @@ VALUES
 (1, 1400, 'Some statistics may be out of date',                       70, 'https://aka.ms/sqldbtipswiki#tip_id-1400', 'VIEW DATABASE STATE'),
 (1, 1410, 'Many tables do not have any indexes',                      60, 'https://aka.ms/sqldbtipswiki#tip_id-1410', 'VIEW DATABASE STATE'),
 (1, 1420, 'Significant lock blocking has recently occurred',          70, 'https://aka.ms/sqldbtipswiki#tip_id-1420', 'VIEW SERVER STATE'),
-(1, 1430, 'The number of recent query compilations is high',          80, 'https://aka.ms/sqldbtipswiki#tip_id-1430', 'VIEW SERVER STATE')
+(1, 1430, 'The number of recent query compilations is high',          80, 'https://aka.ms/sqldbtipswiki#tip_id-1430', 'VIEW SERVER STATE'),
+(1, 1440, 'Row locks or page locks are disabled for some indexes',    90, 'https://aka.ms/sqldbtipswiki#tip_id-1440', 'VIEW DATABASE STATE')
 ;
 
 -- Top queries
@@ -311,6 +312,17 @@ CREATE TABLE #query_wait_stats_summary
 query_hash binary(8) PRIMARY KEY,
 ranked_wait_categories varchar(max) NOT NULL
 );
+
+DECLARE @QueryStoreTimeFrom datetimeoffset = IIF(
+                                                (@QueryStoreCustomTimeStart IS NULL OR @QueryStoreCustomTimeEnd IS NULL) AND @QueryStoreIntervalMinutes IS NOT NULL,
+                                                DATEADD(minute, -@QueryStoreIntervalMinutes, SYSDATETIMEOFFSET()),
+                                                @QueryStoreCustomTimeStart
+                                                ),
+        @QueryStoreTimeThru datetimeoffset = IIF(
+                                                (@QueryStoreCustomTimeStart IS NULL OR @QueryStoreCustomTimeEnd IS NULL) AND @QueryStoreIntervalMinutes IS NOT NULL,
+                                                SYSDATETIMEOFFSET(),
+                                                @QueryStoreCustomTimeEnd
+                                                );
 
 -- query wait stats aggregated by query hash and wait category
 WITH
@@ -330,17 +342,9 @@ WHERE q.is_internal_query = 0
       AND
       q.is_clouddb_internal_query = 0
       AND
-      rsi.start_time >= IIF(
-                           (@QueryStoreCustomTimeStart IS NULL OR @QueryStoreCustomTimeEnd IS NULL) AND @QueryStoreIntervalMinutes IS NOT NULL,
-                           DATEADD(minute, -@QueryStoreIntervalMinutes, SYSDATETIMEOFFSET()),
-                           @QueryStoreCustomTimeStart
-                           )
+      rsi.start_time >= @QueryStoreTimeFrom
       AND
-      rsi.start_time <= IIF(
-                           (@QueryStoreCustomTimeStart IS NULL OR @QueryStoreCustomTimeEnd IS NULL) AND @QueryStoreIntervalMinutes IS NOT NULL,
-                           SYSDATETIMEOFFSET(),
-                           @QueryStoreCustomTimeEnd
-                           )
+      rsi.start_time <= @QueryStoreTimeThru
 GROUP BY q.query_hash,
          ws.wait_category_desc
 ),
@@ -404,17 +408,9 @@ WHERE q.is_internal_query = 0
       AND
       q.is_clouddb_internal_query = 0
       AND
-      rsi.start_time >= IIF(
-                           (@QueryStoreCustomTimeStart IS NULL OR @QueryStoreCustomTimeEnd IS NULL) AND @QueryStoreIntervalMinutes IS NOT NULL,
-                           DATEADD(minute, -@QueryStoreIntervalMinutes, SYSDATETIMEOFFSET()),
-                           @QueryStoreCustomTimeStart
-                           )
+      rsi.start_time >= @QueryStoreTimeFrom
       AND
-      rsi.start_time <= IIF(
-                           (@QueryStoreCustomTimeStart IS NULL OR @QueryStoreCustomTimeEnd IS NULL) AND @QueryStoreIntervalMinutes IS NOT NULL,
-                           SYSDATETIMEOFFSET(),
-                           @QueryStoreCustomTimeEnd
-                           )
+      rsi.start_time <= @QueryStoreTimeThru
 GROUP BY q.query_hash
 ),
 -- rank queries along multiple dimensions (cpu, duration, etc.), without ties
@@ -877,6 +873,8 @@ INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1100 AS tip_id,
        CONCAT(
              @NbspCRLF,
+             'Total indexes: ', FORMAT(COUNT(1), '#,0'),
+             @CRLF,
              STRING_AGG(
                        CAST(CONCAT(
                                   'schema: ', schema_name, 
@@ -884,9 +882,7 @@ SELECT 1100 AS tip_id,
                                   ', object size (MB): ', FORMAT(object_size_mb, '#,0.00'),
                                   ', object row count: ', FORMAT(object_row_count, '#,0'),
                                   ', index: ', index_name, 
-                                  ', type: ', index_type,
-                                  ', object_id: ', CAST(object_id AS varchar(11)),
-                                  ', index_id: ', CAST(index_id AS varchar(11))
+                                  ', type: ', index_type
                                   ) AS nvarchar(max)), @CRLF
                        ),
              @CRLF
@@ -1153,6 +1149,8 @@ INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1280 AS tip_id,
        CONCAT(
              @NbspCRLF,
+             'Total resumable index operations: ', FORMAT(COUNT(1), '#,0'),
+             @CRLF,
              STRING_AGG(
                        CAST(CONCAT(
                                   'schema name: ', QUOTENAME(schema_name) COLLATE DATABASE_DEFAULT, @CRLF,
@@ -1276,6 +1274,8 @@ INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1310 AS tip_id,
        CONCAT(
              @NbspCRLF,
+             'Total partitions: ', FORMAT(COUNT(1), '#,0'),
+             @CRLF,
              STRING_AGG(
                        CAST(CONCAT(
                                   'schema: ', schema_name, ', ',
@@ -1418,8 +1418,8 @@ INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1400 AS tip_id,
        CONCAT(
              @NbspCRLF,
-             'Total potentially out of date statistics: ', COUNT(1),
-             REPLICATE(@CRLF, 2),
+             'Total potentially out of date statistics: ', FORMAT(COUNT(1), '#,0'),
+             @CRLF,
              STRING_AGG(
                        CAST(CONCAT(
                                   schema_name, '.', 
@@ -1512,19 +1512,19 @@ INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1410 AS tip_id,
        CONCAT(
              @NbspCRLF,
-             'total tables: ', FORMAT(COUNT(1), '#,0'),
+             'Total tables: ', FORMAT(COUNT(1), '#,0'),
              @CRLF,
              'tables with ', FORMAT(@NoIndexTablesMinRowCountThreshold, '#,0'), 
              ' or more rows and no indexes: ', FORMAT(SUM(no_index_indicator), '#,0'),
              @CRLF, @CRLF,
-             STRING_AGG(
-                       IIF(
-                          no_index_indicator = 1,
-                          CONCAT(
-                                schema_name, '.', table_name
-                                ),
-                          NULL
-                          ),
+             STRING_AGG(CAST(
+                            IIF(
+                               no_index_indicator = 1,
+                               CONCAT(schema_name, '.', table_name),
+                               NULL
+                               )
+                            AS nvarchar(max)
+                            ),
                        @CRLF 
                        ),
              @CRLF
@@ -1538,6 +1538,74 @@ BEGIN CATCH
     IF ERROR_NUMBER() = 1222
         INSERT INTO @SkippedTip (tip_id)
         VALUES (1410);
+    ELSE
+        THROW;
+END CATCH;
+
+-- Disabled page or row locks
+IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1440) AND execute_indicator = 1)
+
+BEGIN TRY
+
+WITH lock_index AS
+(
+SELECT QUOTENAME(OBJECT_SCHEMA_NAME(o.object_id)) COLLATE DATABASE_DEFAULT AS schema_name, 
+       QUOTENAME(o.name) COLLATE DATABASE_DEFAULT AS object_name, 
+       QUOTENAME(i.name) COLLATE DATABASE_DEFAULT AS index_name,
+       i.allow_row_locks,
+       i.allow_page_locks
+FROM sys.indexes AS i
+INNER JOIN sys.objects AS o
+ON i.object_id = o.object_id
+WHERE o.is_ms_shipped = 0
+      AND
+      i.is_hypothetical = 0
+      AND
+      i.type_desc NOT IN ('CLUSTERED COLUMNSTORE','NONCLUSTERED COLUMNSTORE')
+      AND
+      (
+      i.allow_row_locks = 0
+      OR
+      i.allow_page_locks = 0
+      )
+),
+index_agg AS
+(
+SELECT STRING_AGG(
+                 CAST(CONCAT(
+                            schema_name, '.', 
+                            object_name, '.', 
+                            index_name,
+                            ': ',
+                            CONCAT_WS(
+                                     ', ',
+                                     IIF(allow_row_locks = 0, 'row locks disabled', NULL),
+                                     IIF(allow_page_locks = 0, 'page locks disabled', NULL)
+                                     )
+                            ) AS nvarchar(max)), @CRLF
+                 )
+       AS details,
+       COUNT(1) AS index_count
+FROM lock_index
+HAVING COUNT(1) > 0
+)
+INSERT INTO @DetectedTip (tip_id, details)
+SELECT 1440 AS tip_id,
+       CONCAT(
+             @NbspCRLF,
+             'Total indexes: ', FORMAT(index_count, '#,0'),
+             @CRLF,
+             ia.details,
+             @CRLF
+             ) AS details
+FROM index_agg AS ia
+WHERE ia.details IS NOT NULL;
+
+END TRY
+BEGIN CATCH
+    IF ERROR_NUMBER() = 1222
+        INSERT INTO @SkippedTip (tip_id)
+        VALUES (1440);
     ELSE
         THROW;
 END CATCH;
@@ -1779,7 +1847,22 @@ IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1170) AND execute_indic
 
 BEGIN TRY
 
-WITH index_usage AS
+WITH index_size AS
+(
+SELECT p.object_id,
+       p.index_id,
+       SUM(ps.used_page_count) * 8 / 1024. AS total_index_size_mb
+FROM sys.partitions AS p
+INNER JOIN sys.dm_db_partition_stats AS ps
+ON p.partition_id = ps.partition_id
+   AND
+   p.object_id = ps.object_id
+   AND
+   p.index_id = ps.index_id
+GROUP BY p.object_id,
+         p.index_id
+),
+index_usage AS
 (
 SELECT QUOTENAME(OBJECT_SCHEMA_NAME(o.object_id)) COLLATE DATABASE_DEFAULT AS schema_name, 
        QUOTENAME(o.name) COLLATE DATABASE_DEFAULT AS object_name, 
@@ -1787,12 +1870,17 @@ SELECT QUOTENAME(OBJECT_SCHEMA_NAME(o.object_id)) COLLATE DATABASE_DEFAULT AS sc
        ius.user_seeks,
        ius.user_scans,
        ius.user_lookups,
-       ius.user_updates
+       ius.user_updates,
+       ins.total_index_size_mb
 FROM sys.dm_db_index_usage_stats AS ius
 INNER JOIN sys.indexes AS i
 ON ius.object_id = i.object_id
    AND
    ius.index_id = i.index_id
+INNER JOIN index_size AS ins
+ON i.object_id = ins.object_id
+   AND
+   i.index_id = ins.index_id
 INNER JOIN sys.objects AS o
 ON i.object_id = o.object_id
    AND
@@ -1818,10 +1906,11 @@ SELECT STRING_AGG(
                             schema_name, '.', 
                             object_name, '.', 
                             index_name, 
-                            ' (reads: ', FORMAT(user_seeks + user_scans + user_lookups, '#,0'), ' writes: ', FORMAT(user_updates, '#,0'), ')'
+                            ' (reads: ', FORMAT(user_seeks + user_scans + user_lookups, '#,0'), ' | writes: ', FORMAT(user_updates, '#,0'), ' | size (MB): ', FORMAT(total_index_size_mb, '#,0.00'), ')'
                             ) AS nvarchar(max)), @CRLF
                  )
-       AS details
+       AS details,
+       COUNT(1) AS index_count
 FROM index_usage
 HAVING COUNT(1) > 0
 )
@@ -1831,6 +1920,8 @@ SELECT 1170 AS tip_id,
              @NbspCRLF,
              'Since database engine startup at ', CONVERT(varchar(20), si.sqlserver_start_time, 120),
              ' UTC:',
+             REPLICATE(@CRLF, 2),
+             'Total indexes: ', FORMAT(index_count, '#,0'),
              @CRLF,
              iua.details,
              @CRLF
@@ -2081,7 +2172,8 @@ SELECT STRING_AGG(
                             ', avg user impact: ', gs.avg_user_impact, '%.'
                             ) AS nvarchar(max)), @CRLF
                  ) 
-       AS details
+       AS details,
+       COUNT(1) AS index_count
 FROM sys.dm_db_missing_index_group_stats AS gs
 INNER JOIN sys.dm_db_missing_index_groups AS g
 ON gs.group_handle = g.index_group_handle
@@ -2096,6 +2188,8 @@ SELECT 1210 AS tip_id,
              @NbspCRLF,
              'Since database engine startup at ', CONVERT(varchar(20), si.sqlserver_start_time, 120),
              ' UTC:',
+             REPLICATE(@CRLF, 2),
+             'Total indexes: ', FORMAT(index_count, '#,0'),
              @CRLF,
              mia.details,
              @CRLF
@@ -2732,7 +2826,8 @@ SELECT STRING_AGG(
                             'lookups: ', FORMAT(lookup_count, '#,0')
                             ) AS nvarchar(max)), @CRLF
                  )
-       AS details
+       AS details,
+       COUNT(1) AS cci_candidate_count
 FROM cci_candidate_table
 )
 INSERT INTO @DetectedTip (tip_id, details)
@@ -2741,6 +2836,8 @@ SELECT 1290 AS tip_id,
              @NbspCRLF,
              'Since database engine startup at ', CONVERT(varchar(20), si.sqlserver_start_time, 120),
              ' UTC:',
+             REPLICATE(@CRLF, 2),
+             'Total CCI candidates: ', FORMAT(cci_candidate_count, '#,0'),
              @CRLF,
              ccd.details,
              @CRLF
@@ -2917,7 +3014,7 @@ DECLARE @crb TABLE (
 -- stage XML in a table variable to enable parallelism when processing XQuery expressions
 WITH crb AS
 (
-SELECT DATEADD(millisecond, -1 * (si.cpu_ticks/(si.cpu_ticks/si.ms_ticks) - rb.timestamp), CURRENT_TIMESTAMP) AS event_time,
+SELECT DATEADD(second, -0.001 * (si.cpu_ticks/(si.cpu_ticks/si.ms_ticks) - rb.timestamp), CURRENT_TIMESTAMP) AS event_time,
        TRY_CAST(rb.record AS XML) AS record
 FROM sys.dm_os_ring_buffers AS rb
 CROSS JOIN sys.dm_os_sys_info AS si
@@ -3102,7 +3199,7 @@ SELECT MIN(snapshot_time) AS min_snapshot_time,
        MIN(blocked_task_count) AS min_blocked_task_count,
        MAX(blocked_task_count) AS max_blocked_task_count,
        SUM(delta_lock_wait_count) AS total_lock_waits,
-       SUM(delta_lock_wait_time_ms) / 1000 AS total_lock_wait_time_seconds
+       SUM(delta_lock_wait_time_ms) AS total_lock_wait_time_milliseconds
 FROM pre_packed_blocking_snapshot
 WHERE blocking_indicator = 1
 GROUP BY grouping_helper
@@ -3118,7 +3215,7 @@ SELECT 1420 AS tip_id,
                                   'Interval start time: ', FORMAT(DATEADD(millisecond, -avg_snapshot_interval_duration_ms, min_snapshot_time), 's'),
                                   ', end time: ', FORMAT(max_snapshot_time, 's'),
                                   ', duration: ', DATEADD(second, DATEDIFF(second, DATEADD(millisecond, -avg_snapshot_interval_duration_ms, min_snapshot_time), max_snapshot_time), CAST('00:00:00' AS time(0))),
-                                  ', total lock wait time: ', DATEADD(second, total_lock_wait_time_seconds, CAST('00:00:00' AS time(0))),
+                                  ', total lock wait time: ', DATEADD(millisecond, total_lock_wait_time_milliseconds, CAST('00:00:00' AS time(3))),
                                   ', minimum observed blocked tasks: ', FORMAT(min_blocked_task_count, '#,0'),
                                   ', maximum observed blocked tasks: ', FORMAT(max_blocked_task_count, '#,0'),
                                   ', total lock waits: ', FORMAT(total_lock_waits, '#,0')
