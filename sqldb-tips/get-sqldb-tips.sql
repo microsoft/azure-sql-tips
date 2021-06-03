@@ -1,7 +1,7 @@
 /*
 Returns a set of tips to improve database design, health, and performance in Azure SQL Database.
 For the latest version of the script, see https://aka.ms/sqldbtips
-For detailed description, see https://aka.ms/sqldbtipswiki
+For a detailed description, see https://aka.ms/sqldbtipswiki
 */
 
 -- Set to 1 to output tips as a JSON value
@@ -176,7 +176,10 @@ DECLARE
 @QueryCompilationRequestCountThreshold smallint = 100,
 
 -- 1430: The minimum ratio of query compilations (optimizations) to the number of requests to be considered significant
-@QueryCompilationRequestThresholdRatio decimal(3,2) = 0.15
+@QueryCompilationRequestThresholdRatio decimal(3,2) = 0.15,
+
+-- 1450: The minimum local storage usage ratio to be considered significant
+@MinLocalStorageQuotaUsageRatio decimal(3,2) = 0.85
 ;
 
 DECLARE @ExecStartTime datetimeoffset = SYSDATETIMEOFFSET();
@@ -238,53 +241,54 @@ IF DB_NAME() = 'master' AND @EngineEdition = 5
 -- Define all tips
 INSERT INTO @TipDefinition (execute_indicator, tip_id, tip_name, confidence_percent, tip_url, required_permission)
 VALUES
-(1, 1000, 'Reduce MAXDOP on all replicas',                            90, 'https://aka.ms/sqldbtipswiki#tip_id-1000', 'VIEW DATABASE STATE'),
-(1, 1010, 'Reduce MAXDOP on primary',                                 90, 'https://aka.ms/sqldbtipswiki#tip_id-1010', 'VIEW DATABASE STATE'),
-(1, 1020, 'Reduce MAXDOP on secondaries',                             90, 'https://aka.ms/sqldbtipswiki#tip_id-1020', 'VIEW DATABASE STATE'),
-(1, 1030, 'Use the latest database compatibility level',              70, 'https://aka.ms/sqldbtipswiki#tip_id-1030', 'VIEW DATABASE STATE'),
-(1, 1040, 'Enable auto-create statistics',                            95, 'https://aka.ms/sqldbtipswiki#tip_id-1040', 'VIEW DATABASE STATE'),
-(1, 1050, 'Enable auto-update statistics',                            95, 'https://aka.ms/sqldbtipswiki#tip_id-1050', 'VIEW DATABASE STATE'),
-(1, 1060, 'Enable Read Committed Snapshot Isolation (RCSI)',          80, 'https://aka.ms/sqldbtipswiki#tip_id-1060', 'VIEW DATABASE STATE'),
-(1, 1070, 'Enable Query Store',                                       90, 'https://aka.ms/sqldbtipswiki#tip_id-1070', 'VIEW DATABASE STATE'),
-(1, 1071, 'Change Query Store operation mode to read-write',          90, 'https://aka.ms/sqldbtipswiki#tip_id-1071', 'VIEW DATABASE STATE'),
-(1, 1072, 'Change Query Store capture mode from NONE to AUTO/ALL',    90, 'https://aka.ms/sqldbtipswiki#tip_id-1072', 'VIEW DATABASE STATE'),
-(1, 1080, 'Disable AUTO_SHRINK',                                      95, 'https://aka.ms/sqldbtipswiki#tip_id-1080', 'VIEW DATABASE STATE'),
-(1, 1100, 'Avoid GUID leading columns in btree indexes',              60, 'https://aka.ms/sqldbtipswiki#tip_id-1100', 'VIEW DATABASE STATE'),
-(1, 1110, 'Enable FLGP auto-tuning',                                  95, 'https://aka.ms/sqldbtipswiki#tip_id-1110', 'VIEW DATABASE STATE'),
-(1, 1120, 'Used data size is close to MAXSIZE',                       95, 'https://aka.ms/sqldbtipswiki#tip_id-1120', 'VIEW DATABASE STATE'),
-(1, 1130, 'Allocated data size is close to MAXSIZE',                  60, 'https://aka.ms/sqldbtipswiki#tip_id-1130', 'VIEW DATABASE STATE'),
-(1, 1140, 'Allocated data size is much larger than used data size',   50, 'https://aka.ms/sqldbtipswiki#tip_id-1140', 'VIEW DATABASE STATE'),
-(1, 1150, 'Recent CPU throttling found',                              90, 'https://aka.ms/sqldbtipswiki#tip_id-1150', 'VIEW SERVER STATE'),
-(1, 1160, 'Recent out of memory errors found',                        80, 'https://aka.ms/sqldbtipswiki#tip_id-1160', 'VIEW SERVER STATE'),
-(1, 1165, 'Recent memory grant waits and timeouts found',             70, 'https://aka.ms/sqldbtipswiki#tip_id-1165', 'VIEW SERVER STATE'),
-(1, 1170, 'Nonclustered indexes with low reads found',                60, 'https://aka.ms/sqldbtipswiki#tip_id-1170', 'VIEW SERVER STATE'),
-(1, 1180, 'ROW or PAGE compression opportunities may exist',          65, 'https://aka.ms/sqldbtipswiki#tip_id-1180', 'VIEW SERVER STATE'),
-(1, 1190, 'Transaction log IO is close to limit',                     70, 'https://aka.ms/sqldbtipswiki#tip_id-1190', 'VIEW DATABASE STATE'),
-(1, 1200, 'Plan cache is bloated by single-use plans',                90, 'https://aka.ms/sqldbtipswiki#tip_id-1200', 'VIEW DATABASE STATE'),
-(1, 1210, 'Missing indexes may be impacting performance',             70, 'https://aka.ms/sqldbtipswiki#tip_id-1210', 'VIEW SERVER STATE'),
-(1, 1220, 'Redo queue on a secondary replica is large',               60, 'https://aka.ms/sqldbtipswiki#tip_id-1220', 'VIEW DATABASE STATE'),
-(1, 1230, 'Data IOPS are close to workload group limit',              70, 'https://aka.ms/sqldbtipswiki#tip_id-1230', 'VIEW SERVER STATE'),
-(1, 1240, 'Workload group IO governance impact is significant',       40, 'https://aka.ms/sqldbtipswiki#tip_id-1240', 'VIEW SERVER STATE'),
-(1, 1250, 'Data IOPS are close to resource pool limit',               70, 'https://aka.ms/sqldbtipswiki#tip_id-1250', 'VIEW SERVER STATE'),
-(1, 1260, 'Resouce pool IO governance impact is significant',         40, 'https://aka.ms/sqldbtipswiki#tip_id-1260', 'VIEW SERVER STATE'),
-(1, 1270, 'Persistent Version Store size is large',                   70, 'https://aka.ms/sqldbtipswiki#tip_id-1270', 'VIEW SERVER STATE'),
-(1, 1280, 'Paused resumable index operations found',                  90, 'https://aka.ms/sqldbtipswiki#tip_id-1280', 'VIEW DATABASE STATE'),
-(1, 1290, 'Clustered columnstore candidates found',                   50, 'https://aka.ms/sqldbtipswiki#tip_id-1290', 'VIEW SERVER STATE'),
-(1, 1300, 'Geo-replication state may be unhealthy',                   70, 'https://aka.ms/sqldbtipswiki#tip_id-1300', 'VIEW DATABASE STATE'),
-(1, 1310, 'Last partitions are not empty',                            80, 'https://aka.ms/sqldbtipswiki#tip_id-1310', 'VIEW DATABASE STATE'),
-(1, 1320, 'Top queries should be investigated and tuned',             90, 'https://aka.ms/sqldbtipswiki#tip_id-1320', 'VIEW DATABASE STATE'),
-(1, 1330, 'Tempdb data allocated size is close to MAXSIZE',           70, 'https://aka.ms/sqldbtipswiki#tip_id-1330', 'tempdb.VIEW DATABASE STATE'),
-(1, 1340, 'Tempdb data used size is close to MAXSIZE',                95, 'https://aka.ms/sqldbtipswiki#tip_id-1340', 'tempdb.VIEW DATABASE STATE'),
-(1, 1350, 'Tempdb log allocated size is close to MAXSIZE',            80, 'https://aka.ms/sqldbtipswiki#tip_id-1350', 'tempdb.VIEW DATABASE STATE'),
-(1, 1360, 'Worker utilization is close to workload group limit',      80, 'https://aka.ms/sqldbtipswiki#tip_id-1360', 'VIEW SERVER STATE'),
-(1, 1370, 'Worker utilization is close to resource pool limit',       80, 'https://aka.ms/sqldbtipswiki#tip_id-1370', 'VIEW SERVER STATE'),
-(1, 1380, 'Notable network connectivity events found',                30, 'https://aka.ms/sqldbtipswiki#tip_id-1380', 'VIEW SERVER STATE'),
-(1, 1390, 'Instance CPU utilization is high',                         60, 'https://aka.ms/sqldbtipswiki#tip_id-1390', 'VIEW DATABASE STATE'),
-(1, 1400, 'Some statistics may be out of date',                       70, 'https://aka.ms/sqldbtipswiki#tip_id-1400', 'VIEW DATABASE STATE'),
-(1, 1410, 'Many tables do not have any indexes',                      60, 'https://aka.ms/sqldbtipswiki#tip_id-1410', 'VIEW DATABASE STATE'),
-(1, 1420, 'Significant lock blocking has recently occurred',          70, 'https://aka.ms/sqldbtipswiki#tip_id-1420', 'VIEW SERVER STATE'),
-(1, 1430, 'The number of recent query compilations is high',          80, 'https://aka.ms/sqldbtipswiki#tip_id-1430', 'VIEW SERVER STATE'),
-(1, 1440, 'Row locks or page locks are disabled for some indexes',    90, 'https://aka.ms/sqldbtipswiki#tip_id-1440', 'VIEW DATABASE STATE')
+(1, 1000, 'Reduce MAXDOP on all replicas',                             90, 'https://aka.ms/sqldbtipswiki#tip_id-1000', 'VIEW DATABASE STATE'),
+(1, 1010, 'Reduce MAXDOP on primary',                                  90, 'https://aka.ms/sqldbtipswiki#tip_id-1010', 'VIEW DATABASE STATE'),
+(1, 1020, 'Reduce MAXDOP on secondaries',                              90, 'https://aka.ms/sqldbtipswiki#tip_id-1020', 'VIEW DATABASE STATE'),
+(1, 1030, 'Use the latest database compatibility level',               70, 'https://aka.ms/sqldbtipswiki#tip_id-1030', 'VIEW DATABASE STATE'),
+(1, 1040, 'Enable auto-create statistics',                             95, 'https://aka.ms/sqldbtipswiki#tip_id-1040', 'VIEW DATABASE STATE'),
+(1, 1050, 'Enable auto-update statistics',                             95, 'https://aka.ms/sqldbtipswiki#tip_id-1050', 'VIEW DATABASE STATE'),
+(1, 1060, 'Enable Read Committed Snapshot Isolation (RCSI)',           80, 'https://aka.ms/sqldbtipswiki#tip_id-1060', 'VIEW DATABASE STATE'),
+(1, 1070, 'Enable Query Store',                                        90, 'https://aka.ms/sqldbtipswiki#tip_id-1070', 'VIEW DATABASE STATE'),
+(1, 1071, 'Change Query Store operation mode to read-write',           90, 'https://aka.ms/sqldbtipswiki#tip_id-1071', 'VIEW DATABASE STATE'),
+(1, 1072, 'Change Query Store capture mode from NONE to AUTO/ALL',     90, 'https://aka.ms/sqldbtipswiki#tip_id-1072', 'VIEW DATABASE STATE'),
+(1, 1080, 'Disable AUTO_SHRINK',                                       95, 'https://aka.ms/sqldbtipswiki#tip_id-1080', 'VIEW DATABASE STATE'),
+(1, 1100, 'Avoid GUID leading columns in btree indexes',               60, 'https://aka.ms/sqldbtipswiki#tip_id-1100', 'VIEW DATABASE STATE'),
+(1, 1110, 'Enable FLGP auto-tuning',                                   95, 'https://aka.ms/sqldbtipswiki#tip_id-1110', 'VIEW DATABASE STATE'),
+(1, 1120, 'Used data size is close to MAXSIZE',                        95, 'https://aka.ms/sqldbtipswiki#tip_id-1120', 'VIEW DATABASE STATE'),
+(1, 1130, 'Allocated data size is close to MAXSIZE',                   60, 'https://aka.ms/sqldbtipswiki#tip_id-1130', 'VIEW DATABASE STATE'),
+(1, 1140, 'Allocated data size is much larger than used data size',    50, 'https://aka.ms/sqldbtipswiki#tip_id-1140', 'VIEW DATABASE STATE'),
+(1, 1150, 'Recent CPU throttling found',                               90, 'https://aka.ms/sqldbtipswiki#tip_id-1150', 'VIEW SERVER STATE'),
+(1, 1160, 'Recent out of memory errors found',                         80, 'https://aka.ms/sqldbtipswiki#tip_id-1160', 'VIEW SERVER STATE'),
+(1, 1165, 'Recent memory grant waits and timeouts found',              70, 'https://aka.ms/sqldbtipswiki#tip_id-1165', 'VIEW SERVER STATE'),
+(1, 1170, 'Nonclustered indexes with low reads found',                 60, 'https://aka.ms/sqldbtipswiki#tip_id-1170', 'VIEW SERVER STATE'),
+(1, 1180, 'ROW or PAGE compression opportunities may exist',           65, 'https://aka.ms/sqldbtipswiki#tip_id-1180', 'VIEW SERVER STATE'),
+(1, 1190, 'Transaction log IO is close to limit',                      70, 'https://aka.ms/sqldbtipswiki#tip_id-1190', 'VIEW DATABASE STATE'),
+(1, 1200, 'Plan cache is bloated by single-use plans',                 90, 'https://aka.ms/sqldbtipswiki#tip_id-1200', 'VIEW DATABASE STATE'),
+(1, 1210, 'Missing indexes may be impacting performance',              70, 'https://aka.ms/sqldbtipswiki#tip_id-1210', 'VIEW SERVER STATE'),
+(1, 1220, 'Redo queue on a secondary replica is large',                60, 'https://aka.ms/sqldbtipswiki#tip_id-1220', 'VIEW DATABASE STATE'),
+(1, 1230, 'Data IOPS are close to workload group limit',               70, 'https://aka.ms/sqldbtipswiki#tip_id-1230', 'VIEW SERVER STATE'),
+(1, 1240, 'Workload group IO governance impact is significant',        40, 'https://aka.ms/sqldbtipswiki#tip_id-1240', 'VIEW SERVER STATE'),
+(1, 1250, 'Data IOPS are close to resource pool limit',                70, 'https://aka.ms/sqldbtipswiki#tip_id-1250', 'VIEW SERVER STATE'),
+(1, 1260, 'Resouce pool IO governance impact is significant',          40, 'https://aka.ms/sqldbtipswiki#tip_id-1260', 'VIEW SERVER STATE'),
+(1, 1270, 'Persistent Version Store size is large',                    70, 'https://aka.ms/sqldbtipswiki#tip_id-1270', 'VIEW SERVER STATE'),
+(1, 1280, 'Paused resumable index operations found',                   90, 'https://aka.ms/sqldbtipswiki#tip_id-1280', 'VIEW DATABASE STATE'),
+(1, 1290, 'Clustered columnstore candidates found',                    50, 'https://aka.ms/sqldbtipswiki#tip_id-1290', 'VIEW SERVER STATE'),
+(1, 1300, 'Geo-replication state may be unhealthy',                    70, 'https://aka.ms/sqldbtipswiki#tip_id-1300', 'VIEW DATABASE STATE'),
+(1, 1310, 'Last partitions are not empty',                             80, 'https://aka.ms/sqldbtipswiki#tip_id-1310', 'VIEW DATABASE STATE'),
+(1, 1320, 'Top queries should be investigated and tuned',              90, 'https://aka.ms/sqldbtipswiki#tip_id-1320', 'VIEW DATABASE STATE'),
+(1, 1330, 'Tempdb data allocated size is close to MAXSIZE',            70, 'https://aka.ms/sqldbtipswiki#tip_id-1330', 'tempdb.VIEW DATABASE STATE'),
+(1, 1340, 'Tempdb data used size is close to MAXSIZE',                 95, 'https://aka.ms/sqldbtipswiki#tip_id-1340', 'tempdb.VIEW DATABASE STATE'),
+(1, 1350, 'Tempdb log allocated size is close to MAXSIZE',             80, 'https://aka.ms/sqldbtipswiki#tip_id-1350', 'tempdb.VIEW DATABASE STATE'),
+(1, 1360, 'Worker utilization is close to workload group limit',       80, 'https://aka.ms/sqldbtipswiki#tip_id-1360', 'VIEW SERVER STATE'),
+(1, 1370, 'Worker utilization is close to resource pool limit',        80, 'https://aka.ms/sqldbtipswiki#tip_id-1370', 'VIEW SERVER STATE'),
+(1, 1380, 'Notable network connectivity events found',                 30, 'https://aka.ms/sqldbtipswiki#tip_id-1380', 'VIEW SERVER STATE'),
+(1, 1390, 'Instance CPU utilization is high',                          60, 'https://aka.ms/sqldbtipswiki#tip_id-1390', 'VIEW DATABASE STATE'),
+(1, 1400, 'Some statistics may be out of date',                        70, 'https://aka.ms/sqldbtipswiki#tip_id-1400', 'VIEW DATABASE STATE'),
+(1, 1410, 'Many tables do not have any indexes',                       60, 'https://aka.ms/sqldbtipswiki#tip_id-1410', 'VIEW DATABASE STATE'),
+(1, 1420, 'Significant lock blocking has recently occurred',           70, 'https://aka.ms/sqldbtipswiki#tip_id-1420', 'VIEW SERVER STATE'),
+(1, 1430, 'The number of recent query compilations is high',           80, 'https://aka.ms/sqldbtipswiki#tip_id-1430', 'VIEW SERVER STATE'),
+(1, 1440, 'Row locks or page locks are disabled for some indexes',     90, 'https://aka.ms/sqldbtipswiki#tip_id-1440', 'VIEW DATABASE STATE'),
+(1, 1450, 'Allocated local storage is close to maximum local storage', 90, 'https://aka.ms/sqldbtipswiki#tip_id-1450', 'VIEW SERVER STATE')
 ;
 
 -- Top queries
@@ -3292,6 +3296,60 @@ SELECT 1430 AS tip_id,
 FROM packed_high_compilation_snapshot 
 HAVING COUNT(1) > 0
 ;
+
+-- Local storage quota
+IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1450) AND execute_indicator = 1)
+
+WITH
+local_storage AS
+(
+SELECT database_id,
+       DB_NAME(database_id) AS database_name,
+       SUM(IIF(file_id <> 2, size_on_disk_bytes, 0)) / 1024. / 1024 AS data_size_on_disk_mb,
+       SUM(IIF(file_id = 2, size_on_disk_bytes, 0)) / 1024. / 1024 AS log_size_on_disk_mb
+FROM sys.dm_io_virtual_file_stats(default, default)
+GROUP BY database_id
+),
+local_storage_agg AS
+(
+SELECT STRING_AGG(
+                 CAST(CONCAT(
+                            'database (id: ', database_id,
+                            ', name: ' + QUOTENAME(database_name), -- database name is only available for current database and system databases, include for usability if available
+                            '), DATA: ', FORMAT(data_size_on_disk_mb, '#,0.00'),
+                            ', LOG: ', FORMAT(log_size_on_disk_mb, '#,0.00')
+                            ) AS nvarchar(max)), @CRLF
+                 )
+                 WITHIN GROUP (ORDER BY IIF(database_name IS NULL, 1, 0), database_id)
+                 AS storage_summary
+FROM local_storage
+),
+local_storage_quota AS
+(
+SELECT rg.user_data_directory_space_quota_mb,
+       rg.user_data_directory_space_usage_mb,
+       rg.user_data_directory_space_usage_mb * 1. / rg.user_data_directory_space_quota_mb AS quota_usage,
+       lsa.storage_summary
+FROM local_storage_agg AS lsa
+CROSS JOIN sys.dm_user_db_resource_governance AS rg
+WHERE rg.database_id = DB_ID()
+      AND
+      DATABASEPROPERTYEX(DB_NAME(), 'Edition') IN ('Premium','BusinessCritical') -- not relevant for remote storage SLOs      
+)
+INSERT INTO @DetectedTip (tip_id, details)
+SELECT 1450 AS tip_id,
+       CONCAT(
+             @NbspCRLF,
+             'Maximum local storage (MB): ', FORMAT(user_data_directory_space_quota_mb, '#,0.00'), @CRLF,
+             'Allocated local storage (MB): ', FORMAT(user_data_directory_space_usage_mb, '#,0.00'), @CRLF,
+             'Local storage usage (%): ', FORMAT(quota_usage, 'P'),
+             @CRLF, @CRLF,
+             'Allocated local storage per database (MB):', @CRLF,
+             storage_summary, @CRLF
+             )
+       AS details
+FROM local_storage_quota
+WHERE quota_usage > @MinLocalStorageQuotaUsageRatio;
 
 END; -- end tips requiring VIEW SERVER STATE
 
