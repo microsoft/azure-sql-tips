@@ -4,7 +4,7 @@ For all newer compatibility levels, use get-sqldb-tips.sql at https://aka.ms/sql
 
 Returns a set of tips to improve database design, health, and performance in Azure SQL Database.
 For the latest version of the script, see https://aka.ms/sqldbtips
-For detailed description, see https://aka.ms/sqldbtipswiki
+For a detailed description, see https://aka.ms/sqldbtipswiki
 */
 
 -- Set to 1 to output tips as a JSON value
@@ -3340,10 +3340,10 @@ SELECT 1450 AS tip_id,
        CONCAT(
              @NbspCRLF,
              'Maximum local storage (MB): ', FORMAT(user_data_directory_space_quota_mb, '#,0.00'), @CRLF,
-             'Local storage usage (MB): ', FORMAT(user_data_directory_space_usage_mb, '#,0.00'), @CRLF,
+             'Allocated local storage (MB): ', FORMAT(user_data_directory_space_usage_mb, '#,0.00'), @CRLF,
              'Local storage usage (%): ', FORMAT(quota_usage, 'P'),
              @CRLF, @CRLF,
-             'Per database allocated storage (MB):', @CRLF,
+             'Allocated local storage per database (MB):', @CRLF,
              storage_summary, @CRLF
              )
        AS details
