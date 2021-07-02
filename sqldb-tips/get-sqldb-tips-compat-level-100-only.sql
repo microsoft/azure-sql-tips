@@ -182,7 +182,13 @@ DECLARE
 @QueryCompilationRequestThresholdRatio decimal(3,2) = 0.15,
 
 -- 1450: The minimum local storage usage ratio to be considered significant
-@MinLocalStorageQuotaUsageRatio decimal(3,2) = 0.85
+@MinLocalStorageQuotaUsageRatio decimal(3,2) = 0.85,
+
+-- 1490: Values below this fill factor are considered too low
+@FillFactorThreshold tinyint = 90,
+
+-- 1510: The ratio of the remaining identity/sequence range to initial identity range (or maximum sequence range) that is considered too low
+@IdentitySequenceRangeExhaustionThresholdRatio decimal(3,2) = 0.2
 ;
 
 DECLARE @ExecStartTime datetimeoffset = SYSDATETIMEOFFSET();
@@ -256,7 +262,7 @@ VALUES
 (1, 1000, 'Reduce MAXDOP on all replicas',                             90, 'https://aka.ms/sqldbtipswiki#tip_id-1000', 'VIEW DATABASE STATE'),
 (1, 1010, 'Reduce MAXDOP on primary',                                  90, 'https://aka.ms/sqldbtipswiki#tip_id-1010', 'VIEW DATABASE STATE'),
 (1, 1020, 'Reduce MAXDOP on secondaries',                              90, 'https://aka.ms/sqldbtipswiki#tip_id-1020', 'VIEW DATABASE STATE'),
-(1, 1030, 'Use the latest database compatibility level',               70, 'https://aka.ms/sqldbtipswiki#tip_id-1030', 'VIEW DATABASE STATE'),
+(1, 1030, 'Database compatibility level is not the latest',            70, 'https://aka.ms/sqldbtipswiki#tip_id-1030', 'VIEW DATABASE STATE'),
 (1, 1040, 'Enable auto-create statistics',                             95, 'https://aka.ms/sqldbtipswiki#tip_id-1040', 'VIEW DATABASE STATE'),
 (1, 1050, 'Enable auto-update statistics',                             95, 'https://aka.ms/sqldbtipswiki#tip_id-1050', 'VIEW DATABASE STATE'),
 (1, 1060, 'Enable Read Committed Snapshot Isolation (RCSI)',           80, 'https://aka.ms/sqldbtipswiki#tip_id-1060', 'VIEW DATABASE STATE'),
@@ -300,7 +306,15 @@ VALUES
 (1, 1420, 'Significant lock blocking has recently occurred',           70, 'https://aka.ms/sqldbtipswiki#tip_id-1420', 'VIEW SERVER STATE'),
 (1, 1430, 'The number of recent query compilations is high',           80, 'https://aka.ms/sqldbtipswiki#tip_id-1430', 'VIEW SERVER STATE'),
 (1, 1440, 'Row locks or page locks are disabled for some indexes',     90, 'https://aka.ms/sqldbtipswiki#tip_id-1440', 'VIEW DATABASE STATE'),
-(1, 1450, 'Allocated local storage is close to maximum local storage', 90, 'https://aka.ms/sqldbtipswiki#tip_id-1450', 'VIEW SERVER STATE')
+(1, 1450, 'Allocated local storage is close to maximum local storage', 90, 'https://aka.ms/sqldbtipswiki#tip_id-1450', 'VIEW SERVER STATE'),
+(1, 1460, 'Column collation does not match database collation',        70, 'https://aka.ms/sqldbtipswiki#tip_id-1460', 'VIEW DATABASE STATE'),
+(1, 1470, 'Indexes with excessively large keys found',                 90, 'https://aka.ms/sqldbtipswiki#tip_id-1470', 'VIEW DATABASE STATE'),
+(1, 1480, 'Disabled indexes found',                                    90, 'https://aka.ms/sqldbtipswiki#tip_id-1480', 'VIEW DATABASE STATE'),
+(1, 1490, 'Indexes with low fill factor found',                        80, 'https://aka.ms/sqldbtipswiki#tip_id-1490', 'VIEW DATABASE STATE'),
+(1, 1500, 'Non-unique clustered indexes found',                        65, 'https://aka.ms/sqldbtipswiki#tip_id-1500', 'VIEW DATABASE STATE'),
+(1, 1510, 'Most of the IDENTITY range is used',                        95, 'https://aka.ms/sqldbtipswiki#tip_id-1510', 'VIEW DATABASE STATE'),
+(1, 1520, 'Most of the sequence range is used',                        95, 'https://aka.ms/sqldbtipswiki#tip_id-1520', 'VIEW DATABASE STATE'),
+(1, 1530, 'Disabled or not trusted constraints found',                 90, 'https://aka.ms/sqldbtipswiki#tip_id-1530', 'VIEW DATABASE STATE')
 ;
 
 -- Top queries
@@ -878,7 +892,7 @@ SELECT 1100 AS tip_id,
        CONCAT(
              @NbspCRLF,
              'Total indexes: ', FORMAT(COUNT(1), '#,0'),
-             @CRLF,
+             @CRLF, @CRLF,
              STRING_AGG(
                        CAST(CONCAT(
                                   'schema: ', schema_name, 
@@ -907,7 +921,7 @@ END CATCH;
 -- FLGP auto-tuning
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1110 AS tip_id,
-       CONCAT(@NbspCRLF, 'Reason: ', reason_desc, @CRLF) AS details
+       CONCAT(@NbspCRLF, 'Reason: ' + NULLIF(reason_desc, ''), @CRLF) AS details
 FROM sys.database_automatic_tuning_options
 WHERE name = 'FORCE_LAST_GOOD_PLAN'
       AND
@@ -1154,7 +1168,7 @@ SELECT 1280 AS tip_id,
        CONCAT(
              @NbspCRLF,
              'Total resumable index operations: ', FORMAT(COUNT(1), '#,0'),
-             @CRLF,
+             @CRLF, @CRLF,
              STRING_AGG(
                        CAST(CONCAT(
                                   'schema name: ', QUOTENAME(schema_name) COLLATE DATABASE_DEFAULT, @CRLF,
@@ -1279,7 +1293,7 @@ SELECT 1310 AS tip_id,
        CONCAT(
              @NbspCRLF,
              'Total partitions: ', FORMAT(COUNT(1), '#,0'),
-             @CRLF,
+             @CRLF, @CRLF,
              STRING_AGG(
                        CAST(CONCAT(
                                   'schema: ', schema_name, ', ',
@@ -1423,7 +1437,7 @@ SELECT 1400 AS tip_id,
        CONCAT(
              @NbspCRLF,
              'Total potentially out of date statistics: ', FORMAT(COUNT(1), '#,0'),
-             @CRLF,
+             @CRLF, @CRLF,
              STRING_AGG(
                        CAST(CONCAT(
                                   schema_name, '.', 
@@ -1517,8 +1531,8 @@ SELECT 1410 AS tip_id,
        CONCAT(
              @NbspCRLF,
              'Total tables: ', FORMAT(COUNT(1), '#,0'),
-             @CRLF,
-             'tables with ', FORMAT(@NoIndexTablesMinRowCountThreshold, '#,0'), 
+             @CRLF, @CRLF,
+             'Tables with ', FORMAT(@NoIndexTablesMinRowCountThreshold, '#,0'), 
              ' or more rows and no indexes: ', FORMAT(SUM(no_index_indicator), '#,0'),
              @CRLF, @CRLF,
              STRING_AGG(CAST(
@@ -1598,7 +1612,7 @@ SELECT 1440 AS tip_id,
        CONCAT(
              @NbspCRLF,
              'Total indexes: ', FORMAT(index_count, '#,0'),
-             @CRLF,
+             @CRLF, @CRLF,
              ia.details,
              @CRLF
              ) AS details
@@ -1610,6 +1624,428 @@ BEGIN CATCH
     IF ERROR_NUMBER() = 1222
         INSERT INTO @SkippedTip (tip_id)
         VALUES (1440);
+    ELSE
+        THROW;
+END CATCH;
+
+-- Database-column collation mismatches
+IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1460) AND execute_indicator = 1)
+
+BEGIN TRY
+
+WITH
+table_column AS
+(
+SELECT o.object_id,
+       c.column_id,
+       c.name COLLATE DATABASE_DEFAULT AS column_name,
+       c.collation_name COLLATE DATABASE_DEFAULT AS column_collation,
+       CAST(DATABASEPROPERTYEX(DB_NAME(), 'Collation') AS sysname) COLLATE DATABASE_DEFAULT AS database_collation
+FROM sys.objects AS o
+INNER JOIN sys.columns AS c
+ON o.object_id = c.object_id
+WHERE o.is_ms_shipped = 0
+      AND
+      o.type_desc IN ('USER_TABLE','VIEW')
+),
+collation_mismatch_table AS
+(
+SELECT object_id,
+       QUOTENAME(OBJECT_SCHEMA_NAME(object_id)) COLLATE DATABASE_DEFAULT AS schema_name,
+       QUOTENAME(OBJECT_NAME(object_id)) COLLATE DATABASE_DEFAULT AS object_name,
+       column_collation,
+       MIN(database_collation) AS database_collation,
+       STRING_AGG(CAST(QUOTENAME(column_name) AS nvarchar(max)), ',') AS column_list
+FROM table_column
+WHERE column_collation <> database_collation
+GROUP BY object_id,
+         column_collation
+)
+INSERT INTO @DetectedTip (tip_id, details)
+SELECT 1460 AS tip_id,
+       CONCAT(
+             @NbspCRLF,
+             'Database collation: ', MIN(database_collation), @CRLF,
+             'Total objects with mismatched collation columns: ', FORMAT(COUNT(DISTINCT(object_id)), '#,0'),
+             @CRLF, @CRLF,
+             STRING_AGG(CAST(
+                            CONCAT(schema_name, '.', object_name, ': ', column_list, ' (', column_collation, ')')
+                            AS nvarchar(max)
+                            ),
+                       @CRLF 
+                       ),
+             @CRLF
+             )
+       AS details
+FROM collation_mismatch_table
+HAVING COUNT(1) > 0;
+
+END TRY
+BEGIN CATCH
+    IF ERROR_NUMBER() = 1222
+        INSERT INTO @SkippedTip (tip_id)
+        VALUES (1460);
+    ELSE
+        THROW;
+END CATCH;
+
+-- Excessively large index keys
+IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1470) AND execute_indicator = 1)
+
+BEGIN TRY
+
+WITH
+large_key_index AS
+(
+SELECT QUOTENAME(OBJECT_SCHEMA_NAME(o.object_id)) COLLATE DATABASE_DEFAULT AS schema_name,
+       QUOTENAME(OBJECT_NAME(o.object_id)) COLLATE DATABASE_DEFAULT AS object_name,
+       QUOTENAME(i.name) COLLATE DATABASE_DEFAULT AS index_name,
+       i.type_desc COLLATE DATABASE_DEFAULT AS index_type,
+       SUM(c.max_length) AS index_key_length_bytes,
+       STRING_AGG(CAST(QUOTENAME(c.name) COLLATE DATABASE_DEFAULT AS nvarchar(max)), ',') AS column_list
+FROM sys.objects AS o
+INNER JOIN sys.indexes AS i
+ON o.object_id = i.object_id
+INNER JOIN sys.index_columns AS ic
+ON i.object_id = ic.object_id
+   AND
+   i.index_id = ic.index_id
+INNER JOIN sys.columns AS c
+ON o.object_id = c.object_id
+   AND
+   ic.column_id = c.column_id
+WHERE o.is_ms_shipped = 0
+      AND
+      o.type_desc IN ('USER_TABLE','VIEW')
+      AND
+      i.type_desc IN ('CLUSTERED','NONCLUSTERED')
+      AND
+      ic.key_ordinal > 0
+GROUP BY o.object_id,
+         i.index_id,
+         i.name,
+         i.type_desc
+HAVING SUM(c.max_length) > IIF(i.type_desc = 'CLUSTERED', 900, 1700)
+)
+INSERT INTO @DetectedTip (tip_id, details)
+SELECT 1470 AS tip_id,
+       CONCAT(
+             @NbspCRLF,
+             'Total indexes with excessively large keys: ', FORMAT(COUNT(1), '#,0'),
+             @CRLF, @CRLF,
+             STRING_AGG(CAST(
+                            CONCAT(
+                                  'schema: ', schema_name,
+                                  ', object: ', object_name,
+                                  ', index: ' +  index_name,
+                                  ', index type: ', index_type,
+                                  ', index key columns: ', column_list,
+                                  ', index key length (bytes): ', FORMAT(index_key_length_bytes, '#,0')
+                                  )
+                            AS nvarchar(max)
+                            ),
+                       @CRLF 
+                       ),
+             @CRLF
+             )
+       AS details
+FROM large_key_index
+HAVING COUNT(1) > 0;
+
+END TRY
+BEGIN CATCH
+    IF ERROR_NUMBER() = 1222
+        INSERT INTO @SkippedTip (tip_id)
+        VALUES (1470);
+    ELSE
+        THROW;
+END CATCH;
+
+-- Indexes: disabled, low fill factor, and non-unique clustered
+IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1480,1490,1500) AND execute_indicator = 1)
+
+BEGIN TRY
+
+WITH
+candidate_index AS
+(
+SELECT QUOTENAME(OBJECT_SCHEMA_NAME(o.object_id)) COLLATE DATABASE_DEFAULT AS schema_name,
+       QUOTENAME(OBJECT_NAME(o.object_id)) COLLATE DATABASE_DEFAULT AS object_name,
+       QUOTENAME(i.name) COLLATE DATABASE_DEFAULT AS index_name,
+       i.type_desc COLLATE DATABASE_DEFAULT AS index_type,
+       i.is_disabled,
+       i.fill_factor,
+       IIF(i.fill_factor > 0 AND i.fill_factor < @FillFactorThreshold, 1, 0) AS is_low_fill_factor,
+       IIF(i.type_desc = 'CLUSTERED' AND i.is_unique = 0, 1, 0) AS is_non_unique_clustered
+FROM sys.objects AS o
+INNER JOIN sys.indexes AS i
+ON o.object_id = i.object_id
+WHERE o.is_ms_shipped = 0
+      AND
+      o.type_desc IN ('USER_TABLE','VIEW')
+)
+INSERT INTO @DetectedTip (tip_id, details)
+SELECT td.tip_id,
+       CONCAT(
+             @NbspCRLF,
+             'Total indexes: ', FORMAT(COUNT(1), '#,0'),
+             @CRLF, @CRLF,
+             STRING_AGG(CAST(
+                            CONCAT(
+                                  'schema: ', schema_name,
+                                  ', object: ', object_name,
+                                  ', index: ' +  index_name,
+                                  IIF(ci.is_non_unique_clustered = 1 AND td.tip_id = 1500, '', CONCAT(', index type: ', index_type)),
+                                  IIF(ci.is_low_fill_factor = 1 AND td.tip_id = 1490, CONCAT(', fill_factor: ', ci.fill_factor), '')
+                                  )
+                            AS nvarchar(max)
+                            ),
+                       @CRLF 
+                       ),
+             @CRLF
+             )
+       AS details
+FROM candidate_index AS ci
+CROSS JOIN @TipDefinition AS td
+WHERE td.execute_indicator = 1
+      AND
+      (
+      (td.tip_id = 1480 AND ci.is_disabled = 1)
+      OR
+      (td.tip_id = 1490 AND ci.is_low_fill_factor = 1)
+      OR
+      (td.tip_id = 1500 AND ci.is_non_unique_clustered = 1)
+      )
+GROUP BY td.tip_id
+HAVING COUNT(1) > 0;
+
+END TRY
+BEGIN CATCH
+    IF ERROR_NUMBER() = 1222
+        INSERT INTO @SkippedTip (tip_id)
+        VALUES (1480),(1490),(1500);
+    ELSE
+        THROW;
+END CATCH;
+
+-- IDENTITY columns close to running out of numbers
+IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1510) AND execute_indicator = 1)
+
+BEGIN TRY
+
+WITH
+data_type_range AS
+(
+SELECT *
+FROM (
+     VALUES (48, 0, 255), -- tinyint
+            (52, -32768, 32767), -- smallint
+            (56, -2147483648, 2147483647), -- int
+            (127, -9223372036854775808, 9223372036854775807), -- bigint
+            (106, -99999999999999999999999999999999999999, 99999999999999999999999999999999999999), -- decimal
+            (108, -99999999999999999999999999999999999999, 99999999999999999999999999999999999999) -- numeric
+     ) AS dt (system_type_id, range_min, range_max)
+),
+identity_column AS
+(
+SELECT QUOTENAME(OBJECT_SCHEMA_NAME(t.object_id)) COLLATE DATABASE_DEFAULT AS schema_name,
+       QUOTENAME(OBJECT_NAME(t.object_id)) COLLATE DATABASE_DEFAULT AS table_name,
+       QUOTENAME(c.name) AS column_name,
+       tp.name AS system_type_name,
+       IDENT_CURRENT(CONCAT(OBJECT_SCHEMA_NAME(t.object_id),'.',t.name)) AS current_identity_value, 
+       IDENT_INCR(CONCAT(OBJECT_SCHEMA_NAME(t.object_id),'.',t.name)) AS identity_increment,
+       IDENT_SEED(CONCAT(OBJECT_SCHEMA_NAME(t.object_id),'.',t.name)) AS identity_seed,
+       dtr.range_min,
+       dtr.range_max,
+       CAST(dtr.range_min AS float) AS range_min_float,
+       CAST(dtr.range_max AS float) AS range_max_float
+FROM sys.tables AS t
+INNER JOIN sys.columns AS c
+ON t.object_id = c.object_id
+INNER JOIN sys.types AS tp
+ON c.system_type_id = tp.system_type_id
+INNER JOIN data_type_range AS dtr
+ON c.system_type_id = dtr.system_type_id
+WHERE c.is_identity = 1
+      AND
+      t.is_ms_shipped = 0
+)
+INSERT INTO @DetectedTip (tip_id, details)
+SELECT 1510 AS tip_id,
+       CONCAT(
+             @NbspCRLF,
+             STRING_AGG(CAST(
+                            CONCAT(
+                                  'schema: ', schema_name,
+                                  ', table: ', table_name,
+                                  ', column: ', column_name,
+                                  ', data type: ' , system_type_name,
+                                  ', initial identity value: ', FORMAT(identity_seed, '#,0'),
+                                  ', current identity value: ', FORMAT(current_identity_value, '#,0'),
+                                  ', identity increment: ', FORMAT(identity_increment, '#,0'),
+                                  ', data type range: ', FORMAT(range_min, '#,0'), ' to ', FORMAT(range_max, '#,0')
+                                  )
+                            AS nvarchar(max)
+                            ),
+                       @CRLF 
+                       ),
+             @CRLF
+             )
+       AS details
+FROM identity_column
+WHERE -- less than x% of the initial identity range remains
+      CASE WHEN identity_increment > 0 THEN (range_max_float - current_identity_value) / IIF((range_max_float - identity_seed) = 0, range_max_float - 1, range_max_float - identity_seed)
+           WHEN identity_increment < 0 THEN (range_min_float - current_identity_value) / IIF((range_min_float - identity_seed) = 0, range_min_float + 1, range_min_float - identity_seed)
+      END < @IdentitySequenceRangeExhaustionThresholdRatio
+HAVING COUNT(1) > 0;
+
+END TRY
+BEGIN CATCH
+    IF ERROR_NUMBER() = 1222
+        INSERT INTO @SkippedTip (tip_id)
+        VALUES (1510);
+    ELSE
+        THROW;
+END CATCH;
+
+-- Sequences close to running out of numbers
+IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1520) AND execute_indicator = 1)
+
+BEGIN TRY
+
+WITH
+sequence_object AS
+(
+SELECT QUOTENAME(OBJECT_SCHEMA_NAME(s.object_id)) COLLATE DATABASE_DEFAULT AS schema_name,
+       QUOTENAME(OBJECT_NAME(s.object_id)) COLLATE DATABASE_DEFAULT AS sequence_name,
+       tp.name AS system_type_name,
+       -- use float to work around sql_variant not supporting arithmetic expressions
+       CAST(s.current_value AS float) AS current_value,
+       CAST(s.start_value AS float) AS start_value,
+       CAST(s.minimum_value AS float) AS minimum_value,
+       CAST(s.maximum_value AS float) AS maximum_value,
+       CAST(s.increment AS float) AS increment,
+       s.is_exhausted
+FROM sys.sequences AS s
+INNER JOIN sys.types AS tp
+ON s.system_type_id = tp.system_type_id
+WHERE s.is_ms_shipped = 0
+)
+INSERT INTO @DetectedTip (tip_id, details)
+SELECT 1520 AS tip_id,
+       CONCAT(
+             @NbspCRLF,
+             STRING_AGG(CAST(
+                            CONCAT(
+                                  'schema: ', schema_name,
+                                  ', sequence: ', sequence_name,
+                                  ', data type: ' , system_type_name,
+                                  ', start value: ', FORMAT(start_value, '#,0'),
+                                  ', current value: ', FORMAT(current_value, '#,0'),
+                                  ', increment: ', FORMAT(increment, '#,0'),
+                                  ', range: ', FORMAT(minimum_value, '#,0'), ' to ', FORMAT(maximum_value, '#,0'),
+                                  ', exhausted: ', IIF(is_exhausted = 1, 'Yes', 'No')
+                                  )
+                            AS nvarchar(max)
+                            ),
+                       @CRLF 
+                       ),
+             @CRLF
+             )
+       AS details
+FROM sequence_object
+WHERE -- less than x% of the maximum sequence range remains
+      CASE WHEN increment > 0 THEN (maximum_value - current_value) / (maximum_value - minimum_value)
+           WHEN increment < 0 THEN (minimum_value - current_value) / (minimum_value - maximum_value)
+      END < @IdentitySequenceRangeExhaustionThresholdRatio
+HAVING COUNT(1) > 0;
+
+END TRY
+BEGIN CATCH
+    IF ERROR_NUMBER() = 1222
+        INSERT INTO @SkippedTip (tip_id)
+        VALUES (1520);
+    ELSE
+        THROW;
+END CATCH;
+
+-- Disabled or untrusted constraints
+IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1530) AND execute_indicator = 1)
+
+BEGIN TRY
+
+WITH
+fk_check_constraint AS
+(
+SELECT parent_object_id,
+       name,
+       type_desc,
+       is_disabled,
+       is_not_trusted,
+       is_ms_shipped
+FROM sys.foreign_keys
+UNION
+SELECT parent_object_id,
+       name,
+       type_desc,
+       is_disabled,
+       is_not_trusted,
+       is_ms_shipped
+FROM sys.check_constraints
+),
+eligible_constraint AS
+(
+SELECT QUOTENAME(OBJECT_SCHEMA_NAME(t.object_id)) COLLATE DATABASE_DEFAULT AS schema_name,
+       QUOTENAME(OBJECT_NAME(t.object_id)) COLLATE DATABASE_DEFAULT AS table_name,
+       QUOTENAME(fcc.name) COLLATE DATABASE_DEFAULT AS constraint_name,
+       fcc.type_desc AS constraint_type,
+       fcc.is_disabled,
+       fcc.is_not_trusted
+FROM sys.tables AS t
+INNER JOIN fk_check_constraint AS fcc
+ON t.object_id = fcc.parent_object_id
+WHERE t.is_ms_shipped = 0
+      AND
+      fcc.is_ms_shipped = 0
+      AND
+      (
+      fcc.is_disabled = 1
+      OR
+      fcc.is_not_trusted = 1
+      )
+)
+INSERT INTO @DetectedTip (tip_id, details)
+SELECT 1530 AS tip_id,
+       CONCAT(
+             @NbspCRLF,
+             STRING_AGG(CAST(
+                            CONCAT(
+                                  'schema: ', schema_name,
+                                  ', table: ', table_name,
+                                  ', constraint name: ', constraint_name,
+                                  ', constraint type: ', constraint_type,
+                                  ', attributes: ',
+                                   CONCAT_WS(
+                                            ', ',
+                                            IIF(is_disabled = 1, 'disabled', NULL),
+                                            IIF(is_not_trusted = 1, 'not trusted', NULL)
+                                            )
+                                  )
+                            AS nvarchar(max)
+                            ),
+                       @CRLF 
+                       ),
+             @CRLF
+             )
+       AS details
+FROM eligible_constraint
+HAVING COUNT(1) > 0;
+
+END TRY
+BEGIN CATCH
+    IF ERROR_NUMBER() = 1222
+        INSERT INTO @SkippedTip (tip_id)
+        VALUES (1530);
     ELSE
         THROW;
 END CATCH;
@@ -1926,7 +2362,7 @@ SELECT 1170 AS tip_id,
              ' UTC:',
              REPLICATE(@CRLF, 2),
              'Total indexes: ', FORMAT(index_count, '#,0'),
-             @CRLF,
+             @CRLF, @CRLF,
              iua.details,
              @CRLF
              ) AS details
@@ -2194,7 +2630,7 @@ SELECT 1210 AS tip_id,
              ' UTC:',
              REPLICATE(@CRLF, 2),
              'Total indexes: ', FORMAT(index_count, '#,0'),
-             @CRLF,
+             @CRLF, @CRLF,
              mia.details,
              @CRLF
              ) AS details
@@ -2842,7 +3278,7 @@ SELECT 1290 AS tip_id,
              ' UTC:',
              REPLICATE(@CRLF, 2),
              'Total CCI candidates: ', FORMAT(cci_candidate_count, '#,0'),
-             @CRLF,
+             @CRLF, @CRLF,
              ccd.details,
              @CRLF
              ) AS details
