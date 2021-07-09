@@ -330,6 +330,25 @@ DECLARE @QueryStoreTimeFrom datetimeoffset = IIF(
                                                 @QueryStoreCustomTimeEnd
                                                 );
 
+-- Opportunistically update statistics on Query Store internal tables
+BEGIN TRY
+
+UPDATE STATISTICS sys.plan_persist_context_settings;
+UPDATE STATISTICS sys.plan_persist_plan;
+UPDATE STATISTICS sys.plan_persist_plan_feedback;
+UPDATE STATISTICS sys.plan_persist_query;
+UPDATE STATISTICS sys.plan_persist_query_hints;
+UPDATE STATISTICS sys.plan_persist_query_template_parameterization;
+UPDATE STATISTICS sys.plan_persist_query_text;
+UPDATE STATISTICS sys.plan_persist_runtime_stats;
+UPDATE STATISTICS sys.plan_persist_runtime_stats_interval;
+UPDATE STATISTICS sys.plan_persist_wait_stats;
+
+END TRY
+BEGIN CATCH
+    RAISERROR('Query Store statistics not updated, possibly due to insufficient permissions', 10, 1);
+END CATCH;
+
 -- query wait stats aggregated by query hash and wait category
 WITH
 query_wait_stats AS
@@ -1762,6 +1781,21 @@ IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1480,1490,1500) AND exe
 BEGIN TRY
 
 WITH
+index_size AS
+(
+SELECT p.object_id,
+       p.index_id,
+       SUM(ps.used_page_count) * 8 / 1024. AS total_index_size_mb
+FROM sys.partitions AS p
+INNER JOIN sys.dm_db_partition_stats AS ps
+ON p.partition_id = ps.partition_id
+   AND
+   p.object_id = ps.object_id
+   AND
+   p.index_id = ps.index_id
+GROUP BY p.object_id,
+         p.index_id
+),
 candidate_index AS
 (
 SELECT QUOTENAME(OBJECT_SCHEMA_NAME(o.object_id)) COLLATE DATABASE_DEFAULT AS schema_name,
@@ -1771,10 +1805,15 @@ SELECT QUOTENAME(OBJECT_SCHEMA_NAME(o.object_id)) COLLATE DATABASE_DEFAULT AS sc
        i.is_disabled,
        i.fill_factor,
        IIF(i.fill_factor > 0 AND i.fill_factor < @FillFactorThreshold, 1, 0) AS is_low_fill_factor,
-       IIF(i.type_desc = 'CLUSTERED' AND i.is_unique = 0, 1, 0) AS is_non_unique_clustered
+       IIF(i.type_desc = 'CLUSTERED' AND i.is_unique = 0, 1, 0) AS is_non_unique_clustered,
+       ins.total_index_size_mb
 FROM sys.objects AS o
 INNER JOIN sys.indexes AS i
 ON o.object_id = i.object_id
+INNER JOIN index_size AS ins
+ON o.object_id = ins.object_id
+   AND
+   i.index_id = ins.index_id
 WHERE o.is_ms_shipped = 0
       AND
       o.type_desc IN ('USER_TABLE','VIEW')
@@ -1791,6 +1830,7 @@ SELECT td.tip_id,
                                   ', object: ', object_name,
                                   ', index: ' +  index_name,
                                   IIF(ci.is_non_unique_clustered = 1 AND td.tip_id = 1500, '', CONCAT(', index type: ', index_type)),
+                                  ', index size (MB): ', FORMAT(total_index_size_mb, '#,0.00'),
                                   IIF(ci.is_low_fill_factor = 1 AND td.tip_id = 1490, CONCAT(', fill_factor: ', ci.fill_factor), '')
                                   )
                             AS nvarchar(max)
