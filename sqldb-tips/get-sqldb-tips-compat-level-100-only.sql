@@ -1600,6 +1600,14 @@ WHERE o.is_ms_shipped = 0
       AND
       i.type_desc NOT IN ('CLUSTERED COLUMNSTORE','NONCLUSTERED COLUMNSTORE')
       AND
+      NOT EXISTS (
+                 SELECT 1
+                 FROM sys.tables AS t
+                 WHERE t.object_id = o.object_id
+                       AND
+                       t.is_memory_optimized = 1
+                 )
+      AND
       (
       i.allow_row_locks = 0
       OR
@@ -2491,7 +2499,11 @@ WHERE i.type_desc IN ('CLUSTERED','NONCLUSTERED','HEAP')
                  FROM sys.tables AS t
                  WHERE t.object_id = o.object_id
                        AND
+                       (
                        t.is_external = 1
+                       OR
+                       t.is_memory_optimized = 1
+                       )
                  )
       AND
       DATABASEPROPERTYEX(DB_NAME(), 'Updateability') = 'READ_WRITE' -- only produce this on primary
