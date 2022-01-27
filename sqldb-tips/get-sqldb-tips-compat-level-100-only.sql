@@ -188,7 +188,13 @@ DECLARE
 @FillFactorThreshold tinyint = 90,
 
 -- 1510: The ratio of the remaining identity/sequence range to initial identity range (or maximum sequence range) that is considered too low
-@IdentitySequenceRangeExhaustionThresholdRatio decimal(3,2) = 0.2
+@IdentitySequenceRangeExhaustionThresholdRatio decimal(3,2) = 0.2,
+
+-- 1540: The minimum number of total page compression attempts per partition of an index to consider it in this tip
+@PageCompressionAttemptsThreshold int = 100,
+
+-- 1540: The ratio of successful page compression attempts to total page compression attempts that is considered too low
+@MinPageCompressionSuccessRatio decimal(3,2) = 0.5
 ;
 
 DECLARE @ExecStartTime datetimeoffset = SYSDATETIMEOFFSET();
@@ -287,7 +293,7 @@ VALUES
 (1, 1230, 'Data IOPS are close to workload group limit',               70, 'https://aka.ms/sqldbtipswiki#tip_id-1230', 'VIEW SERVER STATE'),
 (1, 1240, 'Workload group IO governance impact is significant',        40, 'https://aka.ms/sqldbtipswiki#tip_id-1240', 'VIEW SERVER STATE'),
 (1, 1250, 'Data IOPS are close to resource pool limit',                70, 'https://aka.ms/sqldbtipswiki#tip_id-1250', 'VIEW SERVER STATE'),
-(1, 1260, 'Resouce pool IO governance impact is significant',          40, 'https://aka.ms/sqldbtipswiki#tip_id-1260', 'VIEW SERVER STATE'),
+(1, 1260, 'Resource pool IO governance impact is significant',         40, 'https://aka.ms/sqldbtipswiki#tip_id-1260', 'VIEW SERVER STATE'),
 (1, 1270, 'Persistent Version Store size is large',                    70, 'https://aka.ms/sqldbtipswiki#tip_id-1270', 'VIEW SERVER STATE'),
 (1, 1280, 'Paused resumable index operations found',                   90, 'https://aka.ms/sqldbtipswiki#tip_id-1280', 'VIEW DATABASE STATE'),
 (1, 1290, 'Clustered columnstore candidates found',                    50, 'https://aka.ms/sqldbtipswiki#tip_id-1290', 'VIEW SERVER STATE'),
@@ -314,7 +320,8 @@ VALUES
 (1, 1500, 'Non-unique clustered indexes found',                        65, 'https://aka.ms/sqldbtipswiki#tip_id-1500', 'VIEW DATABASE STATE'),
 (1, 1510, 'Most of the IDENTITY range is used',                        95, 'https://aka.ms/sqldbtipswiki#tip_id-1510', 'VIEW DATABASE STATE'),
 (1, 1520, 'Most of the sequence range is used',                        95, 'https://aka.ms/sqldbtipswiki#tip_id-1520', 'VIEW DATABASE STATE'),
-(1, 1530, 'Disabled or not trusted constraints found',                 90, 'https://aka.ms/sqldbtipswiki#tip_id-1530', 'VIEW DATABASE STATE')
+(1, 1530, 'Disabled or not trusted constraints found',                 90, 'https://aka.ms/sqldbtipswiki#tip_id-1530', 'VIEW DATABASE STATE'),
+(1, 1540, 'Page compression is ineffective for some indexes',          90, 'https://aka.ms/sqldbtipswiki#tip_id-1540', 'VIEW SERVER STATE')
 ;
 
 -- Top queries
@@ -1600,6 +1607,14 @@ WHERE o.is_ms_shipped = 0
       AND
       i.type_desc NOT IN ('CLUSTERED COLUMNSTORE','NONCLUSTERED COLUMNSTORE')
       AND
+      NOT EXISTS (
+                 SELECT 1
+                 FROM sys.tables AS t
+                 WHERE t.object_id = o.object_id
+                       AND
+                       t.is_memory_optimized = 1
+                 )
+      AND
       (
       i.allow_row_locks = 0
       OR
@@ -2491,7 +2506,11 @@ WHERE i.type_desc IN ('CLUSTERED','NONCLUSTERED','HEAP')
                  FROM sys.tables AS t
                  WHERE t.object_id = o.object_id
                        AND
+                       (
                        t.is_external = 1
+                       OR
+                       t.is_memory_optimized = 1
+                       )
                  )
       AND
       DATABASEPROPERTYEX(DB_NAME(), 'Updateability') = 'READ_WRITE' -- only produce this on primary
@@ -2628,6 +2647,144 @@ BEGIN CATCH
     IF ERROR_NUMBER() = 1222
         INSERT INTO @SkippedTip (tip_id)
         VALUES (1180);
+    ELSE
+        THROW;
+END CATCH;
+
+-- Page compression wasting CPU
+IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1540) AND execute_indicator = 1)
+
+BEGIN TRY
+
+WITH 
+partition_size AS
+(
+SELECT p.object_id,
+       p.index_id,
+       p.partition_number,
+       p.data_compression_desc,
+       SUM(ps.used_page_count) * 8 / 1024. AS total_partition_size_mb,
+       SUM(ps.in_row_used_page_count) * 8 / 1024. AS in_row_partition_size_mb,
+       SUM(ps.row_overflow_used_page_count) * 8 / 1024. AS row_overflow_partition_size_mb,
+       SUM(ps.lob_used_page_count) * 8 / 1024. AS lob_partition_size_mb
+FROM sys.partitions AS p
+INNER JOIN sys.dm_db_partition_stats AS ps
+ON p.partition_id = ps.partition_id
+   AND
+   p.object_id = ps.object_id
+   AND
+   p.index_id = ps.index_id
+GROUP BY p.object_id,
+         p.index_id,
+         p.partition_number,
+         p.data_compression_desc
+),
+-- Look at index stats for each partition of an index
+partition_stats AS
+(
+SELECT o.object_id,
+       i.name AS index_name,
+       i.type_desc AS index_type,
+       p.partition_number,
+       p.total_partition_size_mb,
+       p.in_row_partition_size_mb,
+       p.row_overflow_partition_size_mb,
+       p.lob_partition_size_mb,
+       SUM(p.total_partition_size_mb) OVER (PARTITION BY o.object_id) AS object_size_mb,
+       p.partition_number - ROW_NUMBER() OVER (
+                                              PARTITION BY o.object_id, i.name
+                                              ORDER BY p.partition_number
+                                              ) 
+       AS interval_group, -- used to pack contiguous partition intervals for the same object and index
+       ios.page_compression_attempt_count,
+       ios.page_compression_success_count
+FROM sys.objects AS o
+INNER JOIN sys.indexes AS i
+ON o.object_id = i.object_id
+INNER JOIN partition_size AS p
+ON i.object_id = p.object_id
+   AND
+   i.index_id = p.index_id
+CROSS APPLY sys.dm_db_index_operational_stats(DB_ID(), o.object_id, i.index_id, p.partition_number) AS ios -- assumption: a representative workload has populated index operational stats
+WHERE i.type_desc IN ('CLUSTERED','NONCLUSTERED','HEAP')
+      AND
+      p.data_compression_desc = 'PAGE'
+      AND
+      o.is_ms_shipped = 0
+      AND
+      i.is_hypothetical = 0
+      AND
+      i.is_disabled = 0
+      AND
+      DATABASEPROPERTYEX(DB_NAME(), 'Updateability') = 'READ_WRITE' -- only produce this on primary
+      AND
+      ios.page_compression_attempt_count > @PageCompressionAttemptsThreshold
+      AND
+      ios.page_compression_success_count * 1.0 < @MinPageCompressionSuccessRatio * ios.page_compression_attempt_count
+),
+packed_partition_group AS
+(
+SELECT QUOTENAME(OBJECT_SCHEMA_NAME(object_id)) COLLATE DATABASE_DEFAULT AS schema_name,
+       QUOTENAME(OBJECT_NAME(object_id)) COLLATE DATABASE_DEFAULT AS object_name,
+       QUOTENAME(index_name) COLLATE DATABASE_DEFAULT AS index_name,
+       index_type COLLATE DATABASE_DEFAULT AS index_type,
+       SUM(total_partition_size_mb) AS partition_range_total_size_mb,
+       SUM(in_row_partition_size_mb) AS partition_range_in_row_size_mb,
+       SUM(row_overflow_partition_size_mb) AS partition_range_row_overflow_size_mb,
+       SUM(lob_partition_size_mb) AS partition_range_lob_size_mb,
+       SUM(page_compression_attempt_count) AS page_compression_attempt_count,
+       SUM(page_compression_success_count) AS page_compression_success_count,
+       CONCAT(MIN(partition_number), '-', MAX(partition_number)) AS partition_range,
+       MIN(object_size_mb) AS object_size_mb
+FROM partition_stats
+GROUP BY object_id,
+         index_name,
+         index_type,
+         interval_group
+HAVING COUNT(1) > 0
+),
+packed_partition_group_agg AS
+(
+SELECT STRING_AGG(
+                 CAST(CONCAT(
+                            'schema: ', schema_name,
+                            ', object: ', object_name,
+                            ', index: ' +  index_name,
+                            ', index type: ', index_type,
+                            ', object size (MB): ', FORMAT(object_size_mb, 'N'),
+                            ', partition range: ', partition_range,
+                            ', partition range total size (MB): ', FORMAT(partition_range_total_size_mb, 'N'),
+                            ' (in-row: ', FORMAT(partition_range_in_row_size_mb, 'N'),
+                            ', row overflow: ', FORMAT(partition_range_row_overflow_size_mb, 'N'),
+                            ', LOB: ', FORMAT(partition_range_lob_size_mb, 'N'),
+                            '), page compression total attempts: ', FORMAT(page_compression_attempt_count, '#,0'),
+                            ', page compression successful attempts: ', FORMAT(page_compression_success_count, '#,0')
+                            ) AS nvarchar(max)), @CRLF
+                 )
+       AS details
+FROM packed_partition_group
+HAVING COUNT(1) > 0
+)
+INSERT INTO @DetectedTip (tip_id, details)
+SELECT 1540 AS tip_id,
+       CONCAT(
+             @NbspCRLF,
+             'Since database engine startup at ', CONVERT(varchar(20), si.sqlserver_start_time, 120),
+             ' UTC:',
+             @CRLF,
+             ppga.details,
+             @CRLF
+             ) AS details
+FROM packed_partition_group_agg AS ppga
+CROSS JOIN sys.dm_os_sys_info AS si
+WHERE ppga.details IS NOT NULL
+;
+
+END TRY
+BEGIN CATCH
+    IF ERROR_NUMBER() = 1222
+        INSERT INTO @SkippedTip (tip_id)
+        VALUES (1540);
     ELSE
         THROW;
 END CATCH;
