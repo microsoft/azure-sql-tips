@@ -2620,7 +2620,13 @@ SELECT STRING_AGG(
                             ', row overflow: ', FORMAT(partition_range_row_overflow_size_mb, 'N'),
                             ', LOB: ', FORMAT(partition_range_lob_size_mb, 'N'),
                             '), present compression type: ', present_compression_type,
-                            ', suggested compression type: ', new_compression_type
+                            ', suggested compression type: ', new_compression_type,
+                            ', index rebuild statement: ', CONCAT(
+                                                                 'ALTER INDEX ', index_name, ' ON ', schema_name, '.', object_name, 
+                                                                 ' REBUILD', IIF(partition_range = '1-1', '', CONCAT(' PARTITION = <', partition_range, '>')),
+                                                                 ' WITH (', 'DATA_COMPRESSION = ', new_compression_type, ',',
+                                                                 ' ONLINE = ON (WAIT_AT_LOW_PRIORITY (MAX_DURATION = 15 MINUTES, ABORT_AFTER_WAIT = SELF)), RESUMABLE = ON);'
+                                                                 )
                             ) AS nvarchar(max)), @CRLF
                  )
        AS details
