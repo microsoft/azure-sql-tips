@@ -569,6 +569,7 @@ SELECT 1320 AS tip_id,
              ', updateability: ', CAST(DATABASEPROPERTYEX(DB_NAME(), 'Updateability') AS nvarchar(10)),
              ', logical database GUID: ', rg.logical_database_guid,
              ', physical database GUID: ', rg.physical_database_guid,
+             ', script execution timestamp (UTC): ', CONVERT(varchar(20), SYSUTCDATETIME(), 120),
              @CRLF, @CRLF,
              STRING_AGG(
                        CAST(CONCAT(
