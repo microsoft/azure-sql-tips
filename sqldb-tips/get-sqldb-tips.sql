@@ -569,6 +569,7 @@ SELECT 1320 AS tip_id,
              ', updateability: ', CAST(DATABASEPROPERTYEX(DB_NAME(), 'Updateability') AS nvarchar(10)),
              ', logical database GUID: ', rg.logical_database_guid,
              ', physical database GUID: ', rg.physical_database_guid,
+             ', script execution timestamp (UTC): ', CONVERT(varchar(20), SYSUTCDATETIME(), 120),
              @CRLF, @CRLF,
              STRING_AGG(
                        CAST(CONCAT(
@@ -1009,7 +1010,7 @@ IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1140) AND execute_indic
 WITH allocated_used_space AS
 (
 SELECT SUM(CAST(size AS bigint) * 8 / 1024.) AS space_allocated_mb,
-       SUM(CAST(FILEPROPERTY(name, 'SpaceUsed') AS bigint)) / 1024. / 1024 AS space_used_mb
+       SUM(CAST(FILEPROPERTY(name, 'SpaceUsed') AS bigint)) * 8 / 1024. AS space_used_mb
 FROM sys.database_files
 WHERE type_desc = 'ROWS'
 )
@@ -1022,7 +1023,7 @@ SELECT 1140 AS tip_id,
              @CRLF
              )
 FROM allocated_used_space
-WHERE space_used_mb * 8 / 1024. > @UsedToAllocatedSpaceDbMinSizeMB -- not relevant for small databases
+WHERE space_used_mb > @UsedToAllocatedSpaceDbMinSizeMB -- not relevant for small databases
       AND
       @UsedToAllocatedSpaceThresholdRatio * space_allocated_mb > space_used_mb -- allocated space is more than N times used space
       AND
@@ -2615,7 +2616,13 @@ SELECT STRING_AGG(
                             ', row overflow: ', FORMAT(partition_range_row_overflow_size_mb, 'N'),
                             ', LOB: ', FORMAT(partition_range_lob_size_mb, 'N'),
                             '), present compression type: ', present_compression_type,
-                            ', suggested compression type: ', new_compression_type
+                            ', suggested compression type: ', new_compression_type,
+                            ', index rebuild statement: ', CONCAT(
+                                                                 'ALTER INDEX ', index_name, ' ON ', schema_name, '.', object_name, 
+                                                                 ' REBUILD', IIF(partition_range = '1-1', '', CONCAT(' PARTITION = <', partition_range, '>')),
+                                                                 ' WITH (', 'DATA_COMPRESSION = ', new_compression_type, ',',
+                                                                 ' ONLINE = ON (WAIT_AT_LOW_PRIORITY (MAX_DURATION = 15 MINUTES, ABORT_AFTER_WAIT = SELF)), RESUMABLE = ON);'
+                                                                 )
                             ) AS nvarchar(max)), @CRLF
                  )
                  WITHIN GROUP (ORDER BY object_size_mb DESC, object_name, index_name, partition_range, partition_range_total_size_mb, new_compression_type)
@@ -3428,7 +3435,7 @@ ON t.object_id = ius.object_id
    i.index_id = ius.index_id
 WHERE i.type IN (0,1) -- clustered index or heap
       AND
-      tos.table_size_mb > @CCICandidateMinSizeGB / 1024. -- consider sufficiently large tables only
+      tos.table_size_mb > @CCICandidateMinSizeGB * 1024. -- consider sufficiently large tables only
       AND
       t.is_ms_shipped = 0
       AND
