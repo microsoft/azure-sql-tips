@@ -1019,7 +1019,7 @@ IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1140) AND execute_indic
 WITH allocated_used_space AS
 (
 SELECT SUM(CAST(size AS bigint) * 8 / 1024.) AS space_allocated_mb,
-       SUM(CAST(FILEPROPERTY(name, 'SpaceUsed') AS bigint)) / 1024. / 1024 AS space_used_mb
+       SUM(CAST(FILEPROPERTY(name, 'SpaceUsed') AS bigint)) * 8 / 1024. AS space_used_mb
 FROM sys.database_files
 WHERE type_desc = 'ROWS'
 )
@@ -1032,7 +1032,7 @@ SELECT 1140 AS tip_id,
              @CRLF
              )
 FROM allocated_used_space
-WHERE space_used_mb * 8 / 1024. > @UsedToAllocatedSpaceDbMinSizeMB -- not relevant for small databases
+WHERE space_used_mb > @UsedToAllocatedSpaceDbMinSizeMB -- not relevant for small databases
       AND
       @UsedToAllocatedSpaceThresholdRatio * space_allocated_mb > space_used_mb -- allocated space is more than N times used space
       AND
@@ -3437,7 +3437,7 @@ ON t.object_id = ius.object_id
    i.index_id = ius.index_id
 WHERE i.type IN (0,1) -- clustered index or heap
       AND
-      tos.table_size_mb > @CCICandidateMinSizeGB / 1024. -- consider sufficiently large tables only
+      tos.table_size_mb > @CCICandidateMinSizeGB * 1024. -- consider sufficiently large tables only
       AND
       t.is_ms_shipped = 0
       AND
