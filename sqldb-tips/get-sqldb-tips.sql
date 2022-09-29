@@ -1934,7 +1934,8 @@ SELECT 1510 AS tip_id,
                                   ', initial identity value: ', FORMAT(identity_seed, '#,0'),
                                   ', current identity value: ', FORMAT(current_identity_value, '#,0'),
                                   ', identity increment: ', FORMAT(identity_increment, '#,0'),
-                                  ', data type range: ', FORMAT(range_min, '#,0'), ' to ', FORMAT(range_max, '#,0')
+                                  ', data type range: ', FORMAT(range_min, '#,0'), ' to ', FORMAT(range_max, '#,0'),
+                                  ', remaining contiguous range: ', FORMAT(IIF(identity_increment > 0, range_max_float - current_identity_value, range_min_float - current_identity_value), '#,0')
                                   )
                             AS nvarchar(max)
                             ),
@@ -1994,7 +1995,8 @@ SELECT 1520 AS tip_id,
                                   ', start value: ', FORMAT(start_value, '#,0'),
                                   ', current value: ', FORMAT(current_value, '#,0'),
                                   ', increment: ', FORMAT(increment, '#,0'),
-                                  ', range: ', FORMAT(minimum_value, '#,0'), ' to ', FORMAT(maximum_value, '#,0'),
+                                  ', full range: ', FORMAT(minimum_value, '#,0'), ' to ', FORMAT(maximum_value, '#,0'),
+                                  ', remaining contiguous range: ', FORMAT(IIF(increment > 0, maximum_value - current_value, minimum_value - current_value), '#,0'),
                                   ', exhausted: ', IIF(is_exhausted = 1, 'Yes', 'No')
                                   )
                             AS nvarchar(max)
@@ -2006,8 +2008,8 @@ SELECT 1520 AS tip_id,
        AS details
 FROM sequence_object
 WHERE -- less than x% of the maximum sequence range remains
-      CASE WHEN increment > 0 THEN (maximum_value - current_value) / (maximum_value - minimum_value)
-           WHEN increment < 0 THEN (minimum_value - current_value) / (minimum_value - maximum_value)
+      CASE WHEN increment > 0 THEN (maximum_value - current_value) / (maximum_value - start_value)
+           WHEN increment < 0 THEN (minimum_value - current_value) / (minimum_value - start_value)
       END < @IdentitySequenceRangeExhaustionThresholdRatio
 HAVING COUNT(1) > 0;
 
