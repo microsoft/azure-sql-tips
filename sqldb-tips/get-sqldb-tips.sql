@@ -172,11 +172,11 @@ DECLARE
 -- 1420: The minumum number of blocked tasks observed at the time of each 20-second snapshot to be considered significant
 @LockBlockingBlockedTaskThreshold int = 1,
 
--- 1430: The minimum number of requests in an interval to start considering if query compilations are high
-@QueryCompilationRequestCountThreshold smallint = 100,
+-- 1430: The minimum number of requests in an interval to start considering if query optimizations are high
+@QueryOptimizationRequestCountThreshold smallint = 100,
 
--- 1430: The minimum ratio of query compilations (optimizations) to the number of requests to be considered significant
-@QueryCompilationRequestThresholdRatio decimal(3,2) = 0.15,
+-- 1430: The minimum ratio of query optimizations to the number of requests to be considered significant
+@QueryOptimizationRequestThresholdRatio decimal(3,2) = 0.15,
 
 -- 1450: The minimum local storage usage ratio to be considered significant
 @MinLocalStorageQuotaUsageRatio decimal(3,2) = 0.85,
@@ -298,7 +298,7 @@ VALUES
 (1, 1400, 'Some statistics may be out of date',                        70, 'https://aka.ms/sqldbtipswiki#tip_id-1400', 'VIEW DATABASE STATE'),
 (1, 1410, 'Many tables do not have any indexes',                       60, 'https://aka.ms/sqldbtipswiki#tip_id-1410', 'VIEW DATABASE STATE'),
 (1, 1420, 'Significant lock blocking has recently occurred',           70, 'https://aka.ms/sqldbtipswiki#tip_id-1420', 'VIEW SERVER STATE'),
-(1, 1430, 'The number of recent query compilations is high',           80, 'https://aka.ms/sqldbtipswiki#tip_id-1430', 'VIEW SERVER STATE'),
+(1, 1430, 'The number of recent query optimizations is high',          80, 'https://aka.ms/sqldbtipswiki#tip_id-1430', 'VIEW SERVER STATE'),
 (1, 1440, 'Row locks or page locks are disabled for some indexes',     90, 'https://aka.ms/sqldbtipswiki#tip_id-1440', 'VIEW DATABASE STATE'),
 (1, 1450, 'Allocated local storage is close to maximum local storage', 90, 'https://aka.ms/sqldbtipswiki#tip_id-1450', 'VIEW SERVER STATE'),
 (1, 1460, 'Column collation does not match database collation',        70, 'https://aka.ms/sqldbtipswiki#tip_id-1460', 'VIEW DATABASE STATE'),
@@ -1934,7 +1934,8 @@ SELECT 1510 AS tip_id,
                                   ', initial identity value: ', FORMAT(identity_seed, '#,0'),
                                   ', current identity value: ', FORMAT(current_identity_value, '#,0'),
                                   ', identity increment: ', FORMAT(identity_increment, '#,0'),
-                                  ', data type range: ', FORMAT(range_min, '#,0'), ' to ', FORMAT(range_max, '#,0')
+                                  ', data type range: ', FORMAT(range_min, '#,0'), ' to ', FORMAT(range_max, '#,0'),
+                                  ', remaining contiguous range: ', FORMAT(IIF(identity_increment > 0, range_max_float - current_identity_value, range_min_float - current_identity_value), '#,0')
                                   )
                             AS nvarchar(max)
                             ),
@@ -1994,7 +1995,8 @@ SELECT 1520 AS tip_id,
                                   ', start value: ', FORMAT(start_value, '#,0'),
                                   ', current value: ', FORMAT(current_value, '#,0'),
                                   ', increment: ', FORMAT(increment, '#,0'),
-                                  ', range: ', FORMAT(minimum_value, '#,0'), ' to ', FORMAT(maximum_value, '#,0'),
+                                  ', full range: ', FORMAT(minimum_value, '#,0'), ' to ', FORMAT(maximum_value, '#,0'),
+                                  ', remaining contiguous range: ', FORMAT(IIF(increment > 0, maximum_value - current_value, minimum_value - current_value), '#,0'),
                                   ', exhausted: ', IIF(is_exhausted = 1, 'Yes', 'No')
                                   )
                             AS nvarchar(max)
@@ -2006,8 +2008,8 @@ SELECT 1520 AS tip_id,
        AS details
 FROM sequence_object
 WHERE -- less than x% of the maximum sequence range remains
-      CASE WHEN increment > 0 THEN (maximum_value - current_value) / (maximum_value - minimum_value)
-           WHEN increment < 0 THEN (minimum_value - current_value) / (minimum_value - maximum_value)
+      CASE WHEN increment > 0 THEN (maximum_value - current_value) / (maximum_value - start_value)
+           WHEN increment < 0 THEN (minimum_value - current_value) / (minimum_value - start_value)
       END < @IdentitySequenceRangeExhaustionThresholdRatio
 HAVING COUNT(1) > 0;
 
@@ -3872,17 +3874,17 @@ FROM packed_blocking_snapshot
 HAVING COUNT(1) > 0
 ;
 
--- High query compilations
+-- High query optimizations
 IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1430) AND execute_indicator = 1)
 
 WITH
-high_compilation_snapshot AS
+high_optimizations_snapshot AS
 (
 SELECT snapshot_time,
        duration_ms,
        delta_request_count,
        delta_query_optimizations,
-       IIF(delta_query_optimizations > @QueryCompilationRequestThresholdRatio * delta_request_count AND delta_request_count >= @QueryCompilationRequestCountThreshold, 1, 0) AS high_compilation_indicator
+       IIF(delta_query_optimizations > @QueryOptimizationRequestThresholdRatio * delta_request_count AND delta_request_count >= @QueryOptimizationRequestCountThreshold, 1, 0) AS high_optimizations_indicator
 FROM sys.dm_resource_governor_workload_groups_history_ex
 WHERE @EngineEdition = 5
       AND
@@ -3890,35 +3892,35 @@ WHERE @EngineEdition = 5
       AND
       TRY_CAST(RIGHT(name, LEN(name) - LEN('UserPrimaryGroup.DB') - 2) AS int) = DB_ID()
 ),
-pre_packed_high_compilation_snapshot AS
+pre_packed_high_optimizations_snapshot AS
 (
 SELECT snapshot_time,
        duration_ms,
        delta_request_count,
        delta_query_optimizations,
-       high_compilation_indicator,
+       high_optimizations_indicator,
        ROW_NUMBER() OVER (ORDER BY snapshot_time)
        -
-       SUM(high_compilation_indicator) OVER (ORDER BY snapshot_time ROWS UNBOUNDED PRECEDING)
+       SUM(high_optimizations_indicator) OVER (ORDER BY snapshot_time ROWS UNBOUNDED PRECEDING)
        AS grouping_helper
-FROM high_compilation_snapshot
+FROM high_optimizations_snapshot
 ),
-packed_high_compilation_snapshot AS
+packed_high_optimization_snapshot AS
 (
 SELECT MIN(snapshot_time) AS min_snapshot_time,
        MAX(snapshot_time) AS max_snapshot_time,
        AVG(duration_ms) AS avg_snapshot_interval_duration_ms,
        SUM(delta_request_count) AS total_requests,
-       SUM(delta_query_optimizations) AS total_compilations
-FROM pre_packed_high_compilation_snapshot
-WHERE high_compilation_indicator = 1
+       SUM(delta_query_optimizations) AS total_optimizations
+FROM pre_packed_high_optimizations_snapshot
+WHERE high_optimizations_indicator = 1
 GROUP BY grouping_helper
 )
 INSERT INTO @DetectedTip (tip_id, details)
 SELECT 1430 AS tip_id,
        CONCAT(
              @NbspCRLF,
-             'Time intervals with a high number of query compilations (UTC):',
+             'Time intervals with a high number of query optimizations (UTC):',
              @CRLF, @CRLF,
              STRING_AGG(
                        CAST(CONCAT(
@@ -3926,15 +3928,15 @@ SELECT 1430 AS tip_id,
                                   ', end time: ', FORMAT(max_snapshot_time, 's'),
                                   ', duration: ', DATEADD(second, DATEDIFF(second, DATEADD(millisecond, -avg_snapshot_interval_duration_ms, min_snapshot_time), max_snapshot_time), CAST('00:00:00' AS time(0))),
                                   ', total requests: ', FORMAT(total_requests, '#,0'),
-                                  ', total compilations: ', FORMAT(total_compilations, '#,0'),
-                                  ', query compilation rate: ', FORMAT(LEAST(total_compilations * 1.0 / total_requests, 1), 'P')
+                                  ', total optimizations: ', FORMAT(total_optimizations, '#,0'),
+                                  ', query optimization rate: ', FORMAT(LEAST(total_optimizations * 1.0 / total_requests, 1), 'P')
                                   ) AS nvarchar(max)), @CRLF
                        )
                        WITHIN GROUP (ORDER BY min_snapshot_time DESC),
              @CRLF
              )
        AS details
-FROM packed_high_compilation_snapshot 
+FROM packed_high_optimization_snapshot
 HAVING COUNT(1) > 0
 ;
 
