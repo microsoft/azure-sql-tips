@@ -309,7 +309,8 @@ VALUES
 (1, 1510, 'Most of the IDENTITY range is used',                        95, 'https://aka.ms/sqldbtipswiki#tip_id-1510', 'VIEW DATABASE STATE'),
 (1, 1520, 'Most of the sequence range is used',                        95, 'https://aka.ms/sqldbtipswiki#tip_id-1520', 'VIEW DATABASE STATE'),
 (1, 1530, 'Disabled or not trusted constraints found',                 90, 'https://aka.ms/sqldbtipswiki#tip_id-1530', 'VIEW DATABASE STATE'),
-(1, 1540, 'Page compression is ineffective for some indexes',          90, 'https://aka.ms/sqldbtipswiki#tip_id-1540', 'VIEW SERVER STATE')
+(1, 1540, 'Page compression is ineffective for some indexes',          90, 'https://aka.ms/sqldbtipswiki#tip_id-1540', 'VIEW SERVER STATE'),
+(1, 1550, 'Recent high severity memory pressure found',                90, 'https://aka.ms/sqldbtipswiki#tip_id-1550', 'VIEW SERVER STATE')
 ;
 
 -- Top queries
@@ -3993,6 +3994,46 @@ SELECT 1450 AS tip_id,
        AS details
 FROM local_storage_quota
 WHERE quota_usage > @MinLocalStorageQuotaUsageRatio;
+
+-- Recent high severity memory pressure
+IF EXISTS (SELECT 1 FROM @TipDefinition WHERE tip_id IN (1550) AND execute_indicator = 1)
+
+WITH memory_health_agg AS
+(
+SELECT TOP (3) clerk_type,
+               MAX(pages_allocated_kb) AS max_pages_allocated_kb,
+               MIN(allocation_potential_memory_mb) AS min_allocation_potential_memory_mb
+FROM sys.dm_os_memory_health_history
+CROSS APPLY OPENJSON (top_memory_clerks)
+            WITH (
+                 clerk_type SYSNAME '$.clerk_type',
+                 pages_allocated_kb BIGINT '$.pages_allocated_kb'
+                 )
+WHERE severity_level_desc = 'HIGH'
+GROUP BY clerk_type
+ORDER BY max_pages_allocated_kb DESC
+),
+memory_health_tip AS
+(
+SELECT MIN(min_allocation_potential_memory_mb) AS min_allocation_potential_memory_mb,
+       STRING_AGG(clerk_type, ', ') WITHIN GROUP (ORDER BY max_pages_allocated_kb DESC) AS top_clerks
+FROM memory_health_agg
+HAVING COUNT(1) > 0
+)
+INSERT INTO @DetectedTip (tip_id, details)
+SELECT 1550 AS tip_id,
+       CONCAT(
+             @NbspCRLF,
+             'In the last hour, there were occurrences of high-severity memory pressure in the ',
+             IIF(dso.service_objective = 'ElasticPool', CONCAT(QUOTENAME(dso.elastic_pool_name), ' elastic pool.'), CONCAT(QUOTENAME(DB_NAME(dso.database_id)), ' database.')), @CRLF,
+             'Minimum allocation potential memory (MB): ', FORMAT(min_allocation_potential_memory_mb, '#,0.00'), @CRLF,
+             'Top memory clerks ordered by allocated memory pages: ',
+             top_clerks, @CRLF
+             ) AS details
+FROM memory_health_tip
+CROSS JOIN sys.database_service_objectives AS dso
+WHERE dso.database_id = DB_ID()
+;
 
 END; -- end tips requiring VIEW SERVER STATE
 
